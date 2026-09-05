@@ -1,24 +1,28 @@
-# Secrets — this app never needs a committed key, and nothing here should ever
-# hold one. Kept anyway so an accidental local file cannot be pushed.
+# Test-only dependencies. The app itself has none.
+node_modules/
+
+# Session files can contain real project data. Keep them out of the repo
+# unless you have deliberately checked what is in one.
+*.session.json
+bimtrack-session-*.json
+
+# Your private code lookup must never be committed. It is the one file that
+# turns A-01 back into a real client and site.
+lookup*.xlsx
+*private*.xlsx
+*confidential*
+
+# Secrets. The app needs none, but an accidental local file should not be
+# pushable.
 .env
 .env.*
 *.key
 *.pem
-secrets.json
-credentials.json
 
-# Workspace exports may contain real project and client data. Keep them out of
-# the repo unless you deliberately commit a redacted sample.
-*.cpma.json
-
-# Dependencies (only needed for the test suite; the app itself has none)
-node_modules/
-
-# Build and editor noise
+# Editor and OS noise
 .DS_Store
 Thumbs.db
 .vscode/
 .idea/
 *.log
 npm-debug.log*
-.cache/
