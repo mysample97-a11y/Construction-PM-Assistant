@@ -1,0 +1,101 @@
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      skip_tests:
+        description: "Publish without running the tests. Use only to unblock the site."
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  # The figures this app produces are what a coordinator acts on, so a deploy
+  # that breaks the engine must not reach the site.
+  #
+  # Every step says what it is checking. A bare "exit code 1" in the Actions log
+  # tells you nothing about which one failed, which is a waste of your time.
+  test:
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.skip_tests }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # Runs first and never fails the build, so the log always shows what the
+      # repository actually contains. A missing file is the commonest cause of
+      # a failure here and is invisible without this.
+      - name: Show what was checked out
+        continue-on-error: true
+        run: |
+          echo "node: $(node --version)"
+          echo "--- repository tree ---"
+          find . -path ./node_modules -prune -o -type f -print | sort
+
+      - name: Check the files the tests depend on are present
+        run: |
+          missing=0
+          for f in \
+            "assets/vendor/xlsx.full.min.js" \
+            "assets/vendor/package.json" \
+            "templates/BIM-Multi-Site-Tracker-TEMPLATE.xlsx" \
+            "js/core/engine.js" \
+            "js/core/parser.js" \
+            "js/views/app.js" \
+            "index.html"
+          do
+            if [ -f "$f" ]; then
+              echo "  ok       $f"
+            else
+              echo "  MISSING  $f"
+              missing=1
+            fi
+          done
+          if [ "$missing" = "1" ]; then
+            echo ""
+            echo "A required file is not in the repository. This is almost always an"
+            echo "incomplete upload rather than a code fault: small files inside"
+            echo "folders (assets/vendor/package.json) and binary files (the .xlsx"
+            echo "template) are the ones that get dropped."
+            exit 1
+          fi
+
+      - name: Verify the calculation engine
+        run: node tools/verify-engine.mjs
+
+      - name: Install test-only dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Smoke test the whole workflow
+        run: node --experimental-vm-modules tools/smoke-dom.mjs
+
+  deploy:
+    needs: test
+    # Deploys when the tests pass, and also when they were deliberately skipped
+    # via a manual run. Without the "skipped" case a failing test would lock you
+    # out of publishing entirely, which is too blunt for a tool you rely on.
+    if: ${{ always() && (needs.test.result == 'success' || needs.test.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: .
+      - id: deployment
+        uses: actions/deploy-pages@v4
