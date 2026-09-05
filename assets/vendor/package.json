@@ -1,0 +1,4 @@
+{
+  "//": "The vendored SheetJS build is a CommonJS UMD bundle. The root package.json sets \"type\": \"module\" for the app's own ES modules, which would otherwise make Node parse this file as ESM and return an empty namespace. Scoping this directory back to commonjs lets the test suite require() it. Browsers ignore this file entirely.",
+  "type": "commonjs"
+}

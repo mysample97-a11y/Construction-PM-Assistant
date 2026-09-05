@@ -1,0 +1,132 @@
+/* Layout specific to this app. Tokens and base components come from the
+   shared stylesheets; this file only adds what the workflow needs. */
+
+.shell { display: flex; flex-direction: column; min-height: 100vh; }
+
+.topbar {
+  height: 58px;
+  flex: 0 0 58px;
+  background: var(--block);
+  border-bottom: 1px solid var(--rule-inv);
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  padding: 0 var(--s-4);
+  position: sticky;
+  top: 0;
+  z-index: 30;
+}
+.topbar .btn {
+  background: transparent;
+  border-color: var(--rule-inv);
+  color: var(--ink-inv);
+}
+.topbar .btn:hover { background: var(--block-2); border-color: var(--ink-inv-2); }
+
+.brand { display: flex; align-items: center; gap: var(--s-3); min-width: 0; }
+.brand__mark {
+  font-family: var(--font-block);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  font-size: var(--t-sm);
+  color: var(--block);
+  background: var(--hivis);
+  padding: 3px 7px;
+  border-radius: var(--r-sm);
+}
+.brand__name { color: #fff; font-weight: 650; font-size: var(--t-base); line-height: 1.2; }
+.brand__sub { color: var(--ink-inv-2); font-size: var(--t-xs); }
+
+.body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 360px;
+  gap: var(--s-4);
+  padding: var(--s-4);
+  align-items: start;
+}
+.view { display: flex; flex-direction: column; gap: var(--s-4); padding: 0; }
+.siderail {
+  display: flex; flex-direction: column; gap: var(--s-4);
+  position: sticky; top: calc(58px + var(--s-4));
+}
+@media (max-width: 1180px) {
+  .body { grid-template-columns: minmax(0, 1fr); }
+  .siderail { position: static; }
+}
+
+/* ---------------- numbered steps ---------------- */
+.step .sheet__head { gap: var(--s-3); }
+.step__n {
+  flex: 0 0 24px; height: 24px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 50%;
+  background: var(--block); color: #fff;
+  font-size: var(--t-xs); font-weight: 700;
+}
+
+/* ---------------- selection checkboxes ----------------
+   Completed items go green and stay ticked, so a part-finished run reads at a
+   glance without opening anything. */
+.picks {
+  display: grid;
+  gap: 4px;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+}
+.pick {
+  display: flex; align-items: center; gap: var(--s-2);
+  padding: 7px 10px;
+  border: 1px solid var(--rule);
+  border-radius: var(--r-md);
+  background: var(--sheet);
+  font-size: var(--t-sm);
+  cursor: pointer;
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+.pick:hover { border-color: var(--blueprint); }
+.pick input { accent-color: var(--blueprint); flex: 0 0 auto; }
+.pick--done {
+  background: var(--sign-lo);
+  border-color: #b9dccc;
+  color: #10503a;
+}
+.pick--done input { accent-color: var(--sign); }
+.pick--done .strong { color: #10503a; }
+.pick--active { border-color: var(--hivis); background: var(--hivis-lo); }
+.pick--master {
+  grid-column: 1 / -1;
+  border-style: dashed;
+  border-color: var(--rule-hard);
+  background: var(--sheet-alt);
+}
+.pick--master.pick--done { border-style: solid; }
+
+/* ---------------- reports ---------------- */
+.report { overflow: hidden; }
+.report__head {
+  width: 100%;
+  display: flex; align-items: center; gap: var(--s-3);
+  padding: var(--s-3) var(--s-4);
+  background: var(--sheet-alt);
+  border: 0; border-bottom: 1px solid var(--rule-soft);
+  cursor: pointer; text-align: left;
+  font: inherit; color: inherit;
+}
+.report__head:hover { background: var(--paper-deep); }
+.report__body { padding: var(--s-4); border-left: 3px solid var(--plum); }
+.report__body h3 { margin-bottom: var(--s-2); }
+.report__body h4 { margin: var(--s-4) 0 var(--s-1); }
+.report__body ul { margin: 0 0 var(--s-2); padding-left: 1.1rem; }
+.report__body li { font-size: var(--t-sm); margin-bottom: 4px; }
+
+/* ---------------- misc ---------------- */
+.siderail .sheet__body { padding: var(--s-3) var(--s-4); }
+.siderail .register__body { padding: var(--s-2) var(--s-3); }
+.siderail .register__title { font-size: var(--t-xs); }
+.siderail .register__detail { font-size: var(--t-xs); }
+
+.payload-preview { max-height: 360px; }
+
+@media print {
+  .topbar, .siderail, .step, .dropzone { display: none !important; }
+  .body { grid-template-columns: 1fr; padding: 0; }
+}
