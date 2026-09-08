@@ -16,7 +16,7 @@
  */
 
 import { STATUS, STUCK } from './parser.js';
-import { toISO, addDays, diffDays, parseISO, fmtISO } from './util.js';
+import { toISO, addDays, diffDays } from './util.js';
 
 const sum = (a, f = (x) => x) => a.reduce((n, x) => n + (Number(f(x)) || 0), 0);
 const pct = (n, d) => (d > 0 ? (n / d) * 100 : 0);
@@ -85,6 +85,16 @@ export function analyseSite(site, template, opts = {}) {
   if (!d || asAt < 0) {
     base.taskCount = d?.tasks.length || 0;
     base.noData = true;
+    base.gridTasks = [];
+    base.timeline = {
+      today: toISO(new Date()),
+      startDate: site.start || null,
+      targetSubmission: site.target || null,
+      weeksElapsed: 0,
+      weeksRemainingToTarget: null,
+      weekColumnsAvailable: weeks.length,
+      previousAnalysis: opts.previous || null,
+    };
     if (!d) {
       base.risks.push({
         level: 'medium', code: 'no_detail_sheet',
@@ -419,9 +429,57 @@ export function analyseSite(site, template, opts = {}) {
     }
   }
 
+  /* ---- timeline: where this site is in its own calendar ----
+     Weeks are counted against the site's own start and target, not the
+     workbook's, because sites in different waves start months apart. */
+  const firstWeek = weeks[0]?.end || null;
+  const nowWeek = weeks[asAt]?.end || null;
+  const weeksElapsed = asAt + 1;
+  let weeksToTarget = null;
+  let totalPlannedWeeks = null;
+  if (site.target && nowWeek) {
+    const d = diffDays(nowWeek, site.target);
+    weeksToTarget = d === null ? null : Math.round(d / 7);
+  }
+  if (site.target && firstWeek) {
+    const d = diffDays(firstWeek, site.target);
+    totalPlannedWeeks = d === null ? null : Math.round(d / 7) + 1;
+  }
+  const timeline = {
+    today: toISO(new Date()),
+    startDate: site.start || firstWeek,
+    targetSubmission: site.target,
+    firstReportedWeek: weeks[0]?.label || null,
+    reportingWeekLabel: weeks[asAt]?.label || null,
+    reportingWeekEnding: nowWeek,
+    weeksElapsed,
+    weeksRemainingToTarget: weeksToTarget,
+    totalPlannedWeeks,
+    weekColumnsAvailable: weeks.length,
+    percentOfPlannedTimeUsed: totalPlannedWeeks && totalPlannedWeeks > 0
+      ? Math.round((weeksElapsed / totalPlannedWeeks) * 100) : null,
+    previousAnalysis: opts.previous || null,
+  };
+
+  /* Rows for the weekly status grid: categories interleaved with their tasks,
+     in template order, so the chart reads like the spreadsheet. */
+  const gridTasks = [];
+  const orderOf = (cid) => catMap.get(cid)?.order ?? 9999;
+  const catIds = [...new Set([...d.categories.map((c) => c.id), ...tasks.map((t) => t.categoryId)])]
+    .sort((x, y) => orderOf(x) - orderOf(y) || String(x).localeCompare(String(y)));
+  for (const cid of catIds) {
+    const cat = d.categories.find((c) => c.id === cid);
+    if (cat) gridTasks.push({ id: cat.id, name: cat.name || cid, weekly: cat.weekly, isCategory: true });
+    for (const t of tasks.filter((x) => x.categoryId === cid)) {
+      gridTasks.push({ id: t.id, name: t.name, weekly: t.weekly, isCategory: false });
+    }
+  }
+
   return {
     ...base,
     noData: false,
+    timeline,
+    gridTasks,
     taskCount: tasks.length,
     liveCount: live.length,
     naCount,

@@ -160,8 +160,12 @@ await wait(120);
 
 check('app boots without errors', errors.length === 0, errors.join(' | '));
 check('shell rendered', !!$('.shell'));
+check('fixed rail rendered', !!$('.rail'));
+check('rail has its own scroll area', !!$('.rail__scroll'));
+check('work column rendered', !!$('.work'));
+check('session buttons live in the rail, not a top bar', !!$('.rail__foot'));
 check('step 1 rendered', textOf('#app').includes('Load the workbook'));
-check('usage rail rendered', textOf('.siderail').includes('Requests this minute'));
+check('usage card rendered in the rail', textOf('.rail').includes('Requests this minute'));
 check('later steps hidden until a workbook is loaded', !textOf('#app').includes('Choose what to analyse'));
 
 /* ------------------------- step 1: load ------------------------- */
@@ -191,11 +195,12 @@ await wait(140);
 check('confirming logs no errors', errors.length === 0, errors.join(' | '));
 check('run step appears', textOf('#app').includes('Choose what to analyse'));
 check('reports step appears', textOf('#app').includes('Reports'));
+check('reporting period step appears', textOf('#app').includes('Reporting period'));
 check('a checkbox per site plus master', $$('.pick').length === 4, String($$('.pick').length));
 check('master analysis option present', !!$('.pick--master'));
 check('reset button present', $$('button').some((b) => /Reset/.test(b.textContent)));
-check('timeline chart rendered in the rail', textOf('.siderail').includes('Timeline'));
-check('computed risks shown without any AI call', textOf('.siderail').includes('Computed risks'));
+check('site progress rendered in the rail', textOf('.rail').includes('Site progress'));
+check('computed risks shown without any AI call', textOf('.rail').includes('Computed risks'));
 
 /* ------------------------- selection ------------------------- */
 
@@ -233,14 +238,24 @@ window.fetch = async (url, opts) => {
     headers: { get: () => null },
     json: async () => ({
       candidates: [{ content: { parts: [{ text: JSON.stringify({
-        headline: 'Ductwork is the constraint',
-        verdict: 'at_risk',
-        confidence: 'medium',
-        confidenceReason: 'only four weeks of data',
-        summary: 'T030-02 has been waiting on R3 for two weeks.',
-        bottlenecks: [{ taskId: 'T030-02', issue: 'Waiting on ceiling voids', whoToChase: 'R3', suggestedAction: 'Escalate', urgency: 'high' }],
-        actions: [{ action: 'Chase R3', owner: 'R1', byWhen: 'W05', priority: 'high', expectedEffect: 'Unblocks MEP' }],
-        dataGaps: ['No target week on some tasks'],
+        introduction: 'A-01 is a Type B unit in Wave 1, four weeks in.',
+        timelineNote: 'Four of twelve planned weeks used.',
+        taskStatusInterpretation: 'Setup is done; modelling has barely started.',
+        prerequisiteInterpretation: 'Ceiling void zones are outstanding.',
+        blockedInterpretation: 'T030-02 has been waiting on R3 for two weeks.',
+        additional: {
+          risks: [{ risk: 'MEP slips', why: 'still waiting', impact: 'high' }],
+          patterns: ['All the stalled work traces to one input'],
+          actions: [{ action: 'Chase R3', owner: 'R1', byWhen: 'W05', priority: 'high', expectedEffect: 'Unblocks MEP' }],
+          watchNextWeek: ['Whether the void zones arrive'],
+        },
+        visualisationNote: 'Two empty weeks on the throughput bars.',
+        conclusions: {
+          verdict: 'at_risk', confidence: 'medium',
+          confidenceReason: 'only four weeks of data',
+          statement: 'Ductwork is the constraint and nothing else will move until it clears.',
+          nextSteps: ['Get the void zones confirmed'],
+        },
       }) }] } }],
       usageMetadata: { promptTokenCount: 1200, candidatesTokenCount: 400 },
     }),
@@ -250,7 +265,13 @@ window.fetch = async (url, opts) => {
 global.fetch = window.fetch;
 
 S.setApiKey('AIzaTESTKEY-not-real-000', false);
-S.update((s) => { s.settings.reviewPayload = false; s.selection = ['A-01']; s.includeMaster = false; });
+S.update((s) => {
+  s.settings.reviewPayload = false;
+  s.selection = ['A-01'];
+  s.includeMaster = false;
+  s.period = { label: 'Week 4 review', previousDate: '2026-01-19', previousWeek: 'W03',
+               notes: 'R3 promised the void zones by Friday.', carryPrevious: true };
+});
 await wait(120);
 
 errors = [];
@@ -262,8 +283,22 @@ check('call went to the selected provider', /generativelanguage\.googleapis\.com
 check('report stored under the site code', !!S.get().reports['A-01']);
 check('generation logs no errors', errors.length === 0, errors.join(' | '));
 check('report rendered', textOf('#app').includes('Ductwork is the constraint'));
-check('verdict chip rendered', textOf('#app').includes('at risk'));
+// The eight fixed sections must all appear, or the template has silently drifted.
+for (const [n, title] of [
+  [1, 'Site details and introduction'], [2, 'Timeline'], [3, 'Task status'],
+  [4, 'Prerequisites'], [5, 'Waiting on and blocked'],
+  [6, 'Additional interpretations'], [7, 'Visualisation'], [8, 'Conclusions'],
+]) {
+  check(`report section ${n} rendered (${title})`, textOf('#app').includes(title), title);
+}
+check('computed figures rendered beside the narrative', $$('.figs').length >= 5, String($$('.figs').length));
+check('interpretation is visually separated from the figures', $$('.aiprose').length >= 4, String($$('.aiprose').length));
+await wait(120);
+check('charts rendered into the report', $$('.report .chartwrap').length >= 4, String($$('.report .chartwrap').length));
+check('weekly status grid rendered', textOf('#app').includes('Weekly status grid'));
+check('charts produced real svg', $$('.report .chartbox svg').length >= 3, String($$('.report .chartbox svg').length));
 check('actions rendered', textOf('#app').includes('Chase R3'));
+check('conclusions verdict chip rendered', textOf('#app').includes('at risk'));
 check('completed site marked done in the picker', $$('.pick--done').length === 1, String($$('.pick--done').length));
 check('completed site removed from the selection', !S.get().selection.includes('A-01'));
 check('export buttons appear once a report exists', textOf('#app').includes('Excel (.xlsx)'));
@@ -273,6 +308,9 @@ check('export buttons appear once a report exists', textOf('#app').includes('Exc
 const sent = JSON.stringify(captured.body);
 check('API key is not in the request body', !sent.includes('AIzaTESTKEY'));
 check('request carries the computed payload', sent.includes('percentByWeight'));
+check('request carries the timeline block', sent.includes('weeksRemainingToTarget'));
+check('request carries the previous-period context', sent.includes('Week 4 review') && sent.includes('void zones'));
+check('request tells the model to compare against last time', /previousPeriod/i.test(sent));
 check('request carries no raw weekly grid', !sent.includes('"weekly"'));
 check('request tells the model not to recalculate', /do not recalculate/i.test(sent));
 check('request carries site codes only, no descriptions of real places',
@@ -282,7 +320,7 @@ const usageAfter = (await import('../js/core/tokens.js')).getUsage();
 check('provider-reported usage recorded', usageAfter.input === 1200 && usageAfter.output === 400,
   `${usageAfter.input}/${usageAfter.output}`);
 check('usage is not marked estimated when the provider reported it', usageAfter.estimated === false);
-check('usage rail shows the tokens', textOf('.siderail').includes('1.6k') || textOf('.siderail').includes('Tokens used'));
+check('usage card shows the tokens', textOf('.rail').includes('Tokens used'));
 
 /* -------------------------- error handling -------------------------- */
 
@@ -314,7 +352,7 @@ check('excel export includes the AI report', wbOut.SheetNames.includes('AI repor
 const rtf = buildRTF(reportBlocks(portfolio, S.get().reports));
 check('rtf export builds', rtf.startsWith('{\\rtf1'));
 check('rtf includes the narrative', rtf.includes('Ductwork is the constraint'));
-const printed = buildPrintHTML(portfolio, S.get().reports);
+const printed = buildPrintHTML(portfolio, S.get().reports, true);
 check('print html builds', printed.includes('<!DOCTYPE html>'));
 check('exports log no errors', errors.length === 0, errors.join(' | '));
 

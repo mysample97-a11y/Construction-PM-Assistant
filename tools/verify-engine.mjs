@@ -378,22 +378,41 @@ check('a small run passes', capOk.level === 'low', JSON.stringify(capOk));
 /* ------------------------ 8. exports ------------------------ */
 
 const reports = {
-  'F-01': { key: 'F-01', title: 'Site F-01', kind: 'site', providerLabel: 'Test', model: 'm',
-            tokens: { input: 1, output: 1, estimated: true },
-            result: { headline: 'Behind plan', verdict: 'off_track', summary: 'Two tasks stuck.',
-                      actions: [{ action: 'Chase R3', owner: 'R1', priority: 'high' }] } },
+  'F-01': {
+    key: 'F-01', title: 'Site F-01', kind: 'site', providerLabel: 'Test', model: 'm',
+    tokens: { input: 1, output: 1, estimated: true },
+    result: {
+      introduction: 'A small structural package running four weeks behind.',
+      timelineNote: 'Half the planned time is gone with a third of the work done.',
+      taskStatusInterpretation: 'Modelling has not started in earnest.',
+      prerequisiteInterpretation: 'One prerequisite is overdue and blocking MEP.',
+      blockedInterpretation: 'Ductwork has been blocked three weeks.',
+      additional: {
+        risks: [{ risk: 'MEP slips again', why: 'still blocked', impact: 'high' }],
+        actions: [{ action: 'Chase R3', owner: 'R1', priority: 'high' }],
+        watchNextWeek: ['Whether ceiling voids are confirmed'],
+      },
+      visualisationNote: 'The throughput bars show two empty weeks.',
+      conclusions: {
+        verdict: 'off_track', confidence: 'medium',
+        confidenceReason: 'only six weeks of data',
+        statement: 'Behind plan and not recovering without the void confirmation.',
+        nextSteps: ['Confirm ceiling voids', 'Re-baseline the target week'],
+      },
+    },
+  },
 };
 const rtf = buildRTF([{ style: 'h1', text: 'Title' }, { style: 'p', text: 'Body — with an em dash' }]);
 check('rtf has a valid header', rtf.startsWith('{\\rtf1\\ansi'));
 check('rtf escapes non-ascii', rtf.includes('\\u8212?'), rtf.slice(0, 200));
 check('rtf is balanced', (rtf.match(/\{/g) || []).length === (rtf.match(/\}/g) || []).length);
 
-const html = buildPrintHTML(p, reports);
+const html = buildPrintHTML(p, reports, false);
 check('print html is a full document', html.startsWith('<!DOCTYPE html>') && html.includes('</html>'));
 check('print html contains the site', html.includes('F-01'));
-check('print html contains the ai narrative', html.includes('Behind plan'));
+check('print html contains the ai narrative', html.includes('Behind plan and not recovering'));
 check('print html escapes angle brackets',
-  !buildPrintHTML({ ...p, file: '<script>x</script>' }, {}).includes('<script>x</script>'));
+  !buildPrintHTML({ ...p, file: '<script>x</script>' }, {}, false).includes('<script>x</script>'));
 
 const outWb = buildWorkbook(p, reports);
 check('workbook has a summary sheet', outWb.SheetNames.includes('Summary'));
@@ -453,6 +472,32 @@ if (fsSync.existsSync(tplPath)) {
 } else {
   check('shipped template present in templates/', false, `not found at ${tplPath}`);
 }
+
+/* -------- 10b. the eight report sections survive export -------- */
+
+const secHtml = buildPrintHTML(p, reports, false);
+for (const [n, needle] of [
+  [1, 'Introduction'], [2, 'Timeline'], [3, 'Task status'], [4, 'Prerequisites'],
+  [5, 'Waiting on and blocked'], [6, 'Additional interpretations'],
+  [7, 'Visualisation'], [8, 'Conclusions'],
+]) {
+  check(`report section ${n} (${needle}) reaches the export`, secHtml.includes(needle), needle);
+}
+check('computed figures appear in the export alongside the narrative',
+  secHtml.includes('Computed figures') && /Tasks: \d+ total/.test(secHtml));
+check('the export does not repeat the narrative verbatim in two places',
+  (secHtml.match(/Behind plan and not recovering/g) || []).length === 1);
+
+const tlA = analyseSite(model.sites[0], model.template);
+check('timeline block computed', !!tlA.timeline && tlA.timeline.weeksElapsed === 6, JSON.stringify(tlA.timeline?.weeksElapsed));
+check('timeline knows the planned span', tlA.timeline.totalPlannedWeeks > 0, String(tlA.timeline.totalPlannedWeeks));
+check('timeline reports weeks remaining to target',
+  tlA.timeline.weeksRemainingToTarget !== null, String(tlA.timeline.weeksRemainingToTarget));
+check('grid rows interleave categories with their tasks',
+  tlA.gridTasks.length === tlA.taskCount + 2 && tlA.gridTasks[0].isCategory === true,
+  `${tlA.gridTasks.length} rows`);
+check('every grid row carries a weekly series',
+  tlA.gridTasks.every((g) => Array.isArray(g.weekly)));
 
 /* ------------------------ 11. scale ------------------------ */
 

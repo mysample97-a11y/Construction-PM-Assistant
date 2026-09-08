@@ -57,6 +57,8 @@ GROUND RULES — these are not stylistic preferences.
 4. Separate what has happened from what is forecast, and say what a forecast rests on. A forecast built on three weeks of data is not the same as one built on twelve.
 5. Where the data cannot support a conclusion, say what is missing rather than filling the gap.
 6. Plain professional English. No filler, no restating the input back, no motivational language, no headings that just repeat the schema keys.
+7. The report is divided into fixed sections. SAY EACH THING ONCE, in the section where it belongs. If a blocker belongs in the blocked-log section, do not repeat it in the task-status section or the conclusion. The conclusion draws the threads together in new words; it is not a summary that repeats earlier sentences.
+8. The application renders the figures and the charts itself. Do not list numbers back that are already in the input — interpret them. "43 tasks with 9 done" is wasted space; "the four weeks since kickoff have produced setup work only, with no modelling closed out" is not.
 
 Return strictly valid JSON matching the requested shape. No markdown fences, no commentary outside the JSON.`;
 
@@ -94,6 +96,10 @@ export function buildSitePayload(analysis) {
     reportingWeek: a.reportingWeek
       ? { label: a.reportingWeek.label, weekEnding: a.reportingWeek.end }
       : null,
+    timeline: a.timeline || null,
+    // What the last review said, so this one can speak to what changed rather
+    // than starting from nothing every week.
+    previousPeriod: a.previousPeriod || null,
     computedNote: 'All figures below were computed by the application from the weekly status grid. Do not recalculate them.',
     hasWeeklyData: true,
 
@@ -194,29 +200,61 @@ export function buildMasterPayload(p) {
 /* ============================== schemas ============================== */
 
 const SITE_SCHEMA = `{
-  "headline": "one sentence: the single most important thing about this site right now",
-  "verdict": "on_track" | "at_risk" | "off_track",
-  "confidence": "high" | "medium" | "low",
-  "confidenceReason": "what limits confidence — e.g. only three weeks of data, or most tasks have no target week",
-  "summary": "3-5 sentences a manager could read aloud in a progress meeting",
-  "whatIsDrivingIt": [{"point": "...", "evidence": "the specific task IDs, weeks or figures from the input", "effect": "what it does to the submission date"}],
-  "bottlenecks": [{"taskId": "...", "issue": "...", "whoToChase": "the R code or party from the input, or 'not recorded'", "suggestedAction": "...", "urgency": "high"|"medium"|"low"}],
-  "actions": [{"action": "...", "owner": "R code from the input where known", "byWhen": "a week number or date", "priority": "high"|"medium"|"low", "expectedEffect": "..."}],
-  "watchNextWeek": ["specific things that would tell you early if this is getting worse"],
-  "dataGaps": ["what would make the next review sharper"]
+  "introduction": "2-3 sentences introducing this site: what it is, where it sits in its own programme, and the single thing a reader needs to know before the detail. Do not list figures.",
+
+  "timelineNote": "2-4 sentences on time: how far through the planned period this site is against how much work is done, and whether those two are in step. If a previous analysis is given, say what has changed since it. Nothing about individual tasks here.",
+
+  "taskStatusInterpretation": "3-5 sentences interpreting the task position: what the completion rate and the mix of WIP/not-started actually mean for delivery, which categories are carrying the work and which have not started. Do not mention blocked or waiting work here — that has its own section.",
+
+  "prerequisiteInterpretation": "2-4 sentences on prerequisites: what is outstanding, what it is holding up, and whether the pattern suggests an upstream problem. If none are outstanding, say so in one line and move on.",
+
+  "blockedInterpretation": "3-5 sentences on blocked and waiting work: what is stuck, for how long, on whom, and what it will cost if it stays stuck. Distinguish Blocked (inside the team's control) from Waiting on (outside it) because the response differs.",
+
+  "additional": {
+    "risks": [{"risk": "...", "why": "the evidence from the input", "impact": "high"|"medium"|"low"}],
+    "patterns": ["something the figures reveal that is not obvious from any single one of them"],
+    "actions": [{"action": "...", "owner": "R code from the input where known, else 'not recorded'", "byWhen": "a week number or date", "priority": "high"|"medium"|"low", "expectedEffect": "..."}],
+    "watchNextWeek": ["the specific thing that would tell you early if this is getting worse"]
+  },
+
+  "visualisationNote": "1-3 sentences telling the reader what to look for in the charts below — the shape that matters, not a description of the axes.",
+
+  "conclusions": {
+    "verdict": "on_track" | "at_risk" | "off_track",
+    "confidence": "high" | "medium" | "low",
+    "confidenceReason": "what limits confidence",
+    "statement": "3-4 sentences drawing the threads together in NEW words. Do not repeat sentences from earlier sections.",
+    "nextSteps": ["the two or three things that must happen before the next review"]
+  }
 }`;
 
 const MASTER_SCHEMA = `{
-  "headline": "one sentence covering the whole programme",
-  "verdict": "on_track" | "at_risk" | "off_track",
-  "summary": "4-6 sentences suitable for a client or director update",
-  "siteRanking": [{"site": "A-01", "standing": "ahead"|"on_track"|"behind"|"at_risk", "why": "one line referencing the figures"}],
-  "systemicIssues": [{"issue": "something affecting more than one site", "sitesAffected": ["A-01"], "rootCauseHypothesis": "...", "howToTest": "what to check to confirm it", "fixOnceCentrally": "..."}],
-  "resourceConcerns": [{"resource": "R code", "concern": "...", "suggestedAction": "..."}],
-  "sequencingAndOverlaps": ["where sites competing for the same people or inputs will collide, referencing waves and dates"],
-  "priorityActions": [{"action": "...", "owner": "...", "byWhen": "...", "priority": "high"|"medium"|"low", "affectsSites": ["A-01"]}],
-  "whatIsGoingWell": ["worth saying — a report that is only bad news gets discounted"],
-  "dataGaps": ["..."]
+  "introduction": "2-3 sentences introducing the programme: how many sites, what they have in common, and the headline position.",
+
+  "timelineNote": "2-4 sentences on where the sites sit against their own dates, including which are in the same wave and therefore competing for the same people. If a previous analysis is given, say what has moved since.",
+
+  "taskStatusInterpretation": "3-5 sentences comparing the sites: who is ahead, who is behind, and whether the spread is explained by start dates or by something else.",
+
+  "prerequisiteInterpretation": "2-4 sentences on prerequisites across the sites, especially any provider appearing on more than one.",
+
+  "blockedInterpretation": "3-5 sentences on blocked and waiting work across the programme. A blocker on one site is a site problem; the same blocker on several is a process problem — say which you are looking at.",
+
+  "additional": {
+    "systemicIssues": [{"issue": "...", "sitesAffected": ["A-01"], "rootCauseHypothesis": "...", "howToTest": "what to check to confirm it", "fixOnceCentrally": "..."}],
+    "resourceConcerns": [{"resource": "R code", "concern": "...", "suggestedAction": "..."}],
+    "actions": [{"action": "...", "owner": "...", "byWhen": "...", "priority": "high"|"medium"|"low", "affectsSites": ["A-01"]}],
+    "whatIsGoingWell": ["worth saying — a report that is only bad news gets discounted"]
+  },
+
+  "visualisationNote": "1-3 sentences on what to look for in the charts below.",
+
+  "conclusions": {
+    "verdict": "on_track" | "at_risk" | "off_track",
+    "confidence": "high" | "medium" | "low",
+    "confidenceReason": "...",
+    "statement": "3-4 sentences in NEW words, not a repeat of the sections above.",
+    "nextSteps": ["..."]
+  }
 }`;
 
 /* ============================== prompts ============================== */
@@ -229,6 +267,9 @@ export function buildPrompt(kind, payload, followUp = '') {
   } else {
     parts.push(`Review site ${payload.site} for this reporting week.`);
     parts.push('\nReturn JSON matching exactly this shape:\n' + SITE_SCHEMA);
+  }
+  if (payload.previousPeriod) {
+    parts.push('\nA previous review of this same scope is included in the data as "previousPeriod". Use it: say what has moved, what has not, and whether actions raised last time were acted on. Do not simply repeat it.');
   }
   if (followUp) {
     parts.push('\nThe reader has asked specifically:\n' + followUp + '\nAnswer that within the same JSON shape, in the summary and actions.');

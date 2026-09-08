@@ -55,6 +55,16 @@ export function blank() {
     selection: [],       // site codes ticked for the next run
     includeMaster: false,
     reports: {},         // key -> report object (site code, or '__master__')
+    // Context the user supplies about the period being analysed, so a
+    // continuation week can be read against what came before rather than in
+    // isolation.
+    period: {
+      label: '',              // e.g. "Week 6 review"
+      previousDate: '',       // when the last analysis was run
+      previousWeek: '',       // which week column it covered
+      notes: '',              // what happened since, in the user's words
+      carryPrevious: true,    // include the last stored report as context
+    },
     settings: {
       provider: 'gemini',
       model: '',

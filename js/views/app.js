@@ -8,7 +8,10 @@ import * as S from '../core/session.js';
 import * as T from '../core/tokens.js';
 import { PROVIDERS, run as runAI, buildSitePayload, buildMasterPayload, previewPayload, CancelledError } from '../core/ai.js';
 import { exportExcel, exportWord, exportPDF } from '../core/exports.js';
-import { renderCurve, renderThroughput, renderSiteBars, meter } from '../core/charts.js';
+import {
+  renderCurve, renderThroughput, renderSiteBars, renderStatusGrid, renderStatusMix,
+  renderCategoryProgress, renderBlockerAges, renderResourceLoad, meter, statusLegend,
+} from '../core/charts.js';
 
 const MASTER = S.MASTER_KEY;
 
@@ -40,32 +43,31 @@ let host, rail;
 
 export function boot() {
   const app = $('#app');
-  host = el('main', { class: 'view view--wide' });
-  rail = el('aside', { class: 'siderail' });
-  mount(app,
-    el('div', { class: 'shell' }, [
-      el('header', { class: 'topbar' }, [
-        el('div', { class: 'brand' }, [
-          el('span', { class: 'brand__mark', text: 'BIM' }),
-          el('span', {}, [
-            el('div', { class: 'brand__name', text: 'Multi-Site Delivery Tracker' }),
-            el('div', { class: 'brand__sub', text: 'Codes only · runs entirely in your browser' }),
-          ]),
-        ]),
-        el('span', { class: 'topbar__spacer' }),
-        el('button', { class: 'btn btn--sm', onclick: onSaveSession }, [icon('save', 13), 'Save session']),
-        el('button', { class: 'btn btn--sm', onclick: onLoadSession }, [icon('upload', 13), 'Load session']),
-        el('button', { class: 'btn btn--sm', onclick: openSettings }, [icon('settings', 13), 'Settings']),
+  host = el('main', { class: 'work' });
+  rail = el('div', { class: 'rail__scroll' });
+
+  const railEl = el('aside', { class: 'rail' }, [
+    el('div', { class: 'rail__brand' }, [
+      el('span', { class: 'rail__mark', text: 'BIM' }),
+      el('span', {}, [
+        el('div', { class: 'rail__name', text: 'Multi-Site Delivery Tracker' }),
+        el('div', { class: 'rail__sub', text: 'Codes only — runs in your browser' }),
       ]),
-      el('div', { class: 'body' }, [host, rail]),
     ]),
-  );
+    rail,
+    el('div', { class: 'rail__foot' }, [
+      el('button', { class: 'btn btn--sm', onclick: onSaveSession }, [icon('save', 13), 'Save']),
+      el('button', { class: 'btn btn--sm', onclick: onLoadSession }, [icon('upload', 13), 'Load']),
+      el('button', { class: 'btn btn--sm btn--wide', onclick: openSettings }, [icon('settings', 13), 'Settings & API key']),
+    ]),
+  ]);
+
+  mount(app, el('div', { class: 'shell grid-field' }, [railEl, host]));
+
   S.subscribe(debounce(render, 30));
   S.restore().then((found) => {
     render();
-    if (found && S.get().model) {
-      toast('Previous session restored from this browser.', 'sign');
-    }
+    if (found && S.get().model) toast('Previous session restored from this browser.', 'sign');
     if (!xlsxAvailable()) toast('The spreadsheet reader did not load — imports will not work.', 'survey', 9000);
   });
 }
@@ -75,6 +77,7 @@ function render() {
   mount(host,
     stepImport(st),
     st.model ? stepConfirm(st) : null,
+    st.model && st.confirmed ? stepPeriod(st) : null,
     st.model && st.confirmed ? stepRun(st) : null,
     st.model && st.confirmed ? stepReports(st) : null,
   );
@@ -207,8 +210,75 @@ function stepConfirm(st) {
   return section('2', 'Check what the app read', body);
 }
 
+
 /* ========================================================================
-   Step 3 — choose and run
+   Step 3 — reporting period and what came before
+   ======================================================================== */
+
+function stepPeriod(st) {
+  const p = portfolio();
+  const per = st.period || {};
+  const body = el('div', { class: 'sheet__body stack' });
+
+  const field = (key, label, hint, type = 'text', placeholder = '') => {
+    const node = el('input', { class: 'input', type, value: per[key] || '', placeholder });
+    node.addEventListener('change', () => S.update((x) => { x.period = { ...x.period, [key]: node.value }; }, { silent: true }));
+    return el('div', { class: 'field' }, [
+      el('label', { text: label }), node,
+      hint ? el('span', { class: 'hint', text: hint }) : null,
+    ]);
+  };
+
+  const notes = el('textarea', {
+    class: 'textarea',
+    placeholder: 'What happened since the last review that the spreadsheet does not show? Decisions taken, people moved, client instructions, anything the status columns cannot say.',
+  });
+  notes.value = per.notes || '';
+  notes.addEventListener('change', () => S.update((x) => { x.period = { ...x.period, notes: notes.value }; }, { silent: true }));
+
+  const carry = el('input', { type: 'checkbox', checked: per.carryPrevious !== false ? true : null });
+  carry.addEventListener('change', () => S.update((x) => { x.period = { ...x.period, carryPrevious: carry.checked }; }));
+
+  const stored = Object.values(st.reports || {});
+  const latest = stored.sort((a, b) => String(b.at).localeCompare(String(a.at)))[0];
+
+  body.appendChild(el('p', { class: 'small muted', text: 'Optional, but it is what turns a snapshot into a trend. Anything here is sent with every analysis so the model can say what has changed rather than describing this week in isolation.' }));
+
+  body.appendChild(el('div', { class: 'formgrid' }, [
+    field('label', 'Label for this review', 'e.g. "Week 6 review" or "March monthly".', 'text', 'Week 6 review'),
+    field('previousDate', 'Date of the previous analysis', 'Leave blank if this is the first.', 'date'),
+    field('previousWeek', 'Week the previous analysis covered', 'e.g. W04.', 'text', 'W04'),
+  ]));
+
+  body.appendChild(el('div', { class: 'field' }, [
+    el('label', { text: 'What has happened since the last review' }), notes,
+    el('span', { class: 'hint', text: 'Keep it code-only: R3, A-02. No client or personal names — this is sent to the AI.' }),
+  ]));
+
+  body.appendChild(el('label', { class: 'check' }, [carry, el('span', {}, [
+    el('strong', { text: 'Carry the previous report forward as context. ' }),
+    el('span', {
+      class: 'muted',
+      text: latest
+        ? `The stored review for each site is included so the model can compare. Most recent: ${latest.title}, ${fmtDate((latest.at || '').slice(0, 10))}.`
+        : 'Nothing stored yet — this takes effect once you have generated a report and come back next week.',
+    }),
+  ])]));
+
+  if (latest) {
+    body.appendChild(el('div', { class: 'notice prevbox' }, [
+      el('h4', { text: 'Previous review on file' }),
+      el('p', { class: 'small', text: latest.result?.conclusions?.statement || latest.result?.introduction || latest.result?.headline || 'Stored report available.' }),
+      el('p', { class: 'xs muted', style: { margin: '4px 0 0' }, text: 'This is carried into the next run so progress can be measured against it, not just against the plan.' }),
+    ]));
+  }
+
+  const filled = [per.label, per.previousDate, per.previousWeek, per.notes].filter(Boolean).length;
+  return section('3', 'Reporting period', body, filled ? `${filled} of 4 filled` : 'optional');
+}
+
+/* ========================================================================
+   Step 4 — choose and run
    ======================================================================== */
 
 function stepRun(st) {
@@ -318,14 +388,43 @@ function stepRun(st) {
     !S.hasApiKey() ? el('span', { class: 'chip', dataset: { tone: 'hivis' }, text: 'No API key set' }) : null,
   ]));
 
-  return section('3', 'Choose what to analyse', body, `${Object.keys(st.reports).length} of ${p.sites.length + 1} done`);
+  return section('4', 'Choose what to analyse', body, `${Object.keys(st.reports).length} of ${p.sites.length + 1} done`);
+}
+
+/**
+ * Attach the reporting-period context and, where one exists, a compact summary
+ * of the last review of the same scope. Only the parts a comparison needs are
+ * carried — a whole previous report would double the payload for little gain.
+ */
+function withPeriod(payload, key) {
+  const st = S.get();
+  const per = st.period || {};
+  const prevReport = per.carryPrevious !== false ? st.reports?.[key] : null;
+  const anything = per.label || per.previousDate || per.previousWeek || per.notes || prevReport;
+  if (!anything) return payload;
+
+  return {
+    ...payload,
+    previousPeriod: {
+      reviewLabel: per.label || undefined,
+      previousAnalysisDate: per.previousDate || (prevReport ? String(prevReport.at).slice(0, 10) : undefined),
+      previousWeekCovered: per.previousWeek || undefined,
+      whatHappenedSince: per.notes || undefined,
+      lastReview: prevReport ? {
+        verdict: prevReport.result?.conclusions?.verdict || undefined,
+        statement: prevReport.result?.conclusions?.statement || prevReport.result?.introduction || undefined,
+        actionsRaised: (prevReport.result?.additional?.actions || []).slice(0, 6),
+        nextStepsSet: (prevReport.result?.conclusions?.nextSteps || []).slice(0, 5),
+      } : undefined,
+    },
+  };
 }
 
 function estimateSelection(st, p, keys) {
   let input = 0;
   for (const k of keys) {
     if (k === MASTER) {
-      input += T.estimateTokens(JSON.stringify(buildMasterPayload(p))) + 900;
+        input += T.estimateTokens(JSON.stringify(withPeriod(buildMasterPayload(p), MASTER))) + 1400;
       continue;
     }
     // A selection can outlive the workbook it was made against — for instance
@@ -333,7 +432,7 @@ function estimateSelection(st, p, keys) {
     // that no longer exist rather than estimating a payload for a ghost.
     const site = p.sites.find((s) => s.code === k);
     if (!site) continue;
-    input += T.estimateTokens(JSON.stringify(buildSitePayload(site))) + 900;   // + schema and instructions
+    input += T.estimateTokens(JSON.stringify(withPeriod(buildSitePayload(site), k))) + 1400;   // + schema and instructions
   }
   const maxTokens = Number(st.settings.maxTokens) || 4096;
   return {
@@ -378,11 +477,12 @@ async function startRun() {
         queue.shift();
         continue;
       }
-      const payload = key === MASTER ? buildMasterPayload(p) : buildSitePayload(site);
+      const payload = withPeriod(key === MASTER ? buildMasterPayload(p) : buildSitePayload(site), key);
       const report = await runAI({
         kind: key === MASTER ? 'master' : 'site',
         payload, settings: S.get().settings, signal: controller.signal,
       });
+      report.periodContext = payload.previousPeriod || null;
       // Persist after EVERY call, so a crash or a cancel keeps what is done.
       S.update((s) => {
         s.reports = { ...s.reports, [key]: report };
@@ -451,67 +551,252 @@ function stepReports(st) {
     for (const k of order) body.appendChild(reportCard(st.reports[k], p));
   }
 
-  return section('4', 'Reports', body, keys.length ? `${keys.length} generated` : '');
+  return section('5', 'Reports', body, keys.length ? `${keys.length} generated` : '');
 }
 
+/**
+ * The report, in the eight fixed sections.
+ *
+ * Each section pairs COMPUTED FIGURES, rendered by the app, with the model's
+ * INTERPRETATION of them, visually separated so the reader always knows which
+ * is which. The model is told not to restate figures, so the two do not
+ * duplicate each other.
+ */
 function reportCard(rep, p) {
   const r = rep.result || {};
+  const a = rep.kind === 'master' ? null : p.sites.find((s) => s.code === rep.key);
   const wrap = el('div', { class: 'sheet report' });
   const open = { v: true };
 
   const head = el('button', { class: 'report__head' }, [
     el('span', { class: 'grow row', style: { gap: '8px' } }, [
-      icon('insights', 14),
+      icon('insights', 15),
       el('strong', { text: rep.title }),
-      r.verdict ? el('span', {
+      r.conclusions?.verdict ? el('span', {
         class: 'chip',
-        dataset: { tone: r.verdict === 'on_track' ? 'sign' : (r.verdict === 'at_risk' ? 'hivis' : 'survey') },
-        text: String(r.verdict).replace(/_/g, ' '),
+        dataset: { tone: r.conclusions.verdict === 'on_track' ? 'sign' : (r.conclusions.verdict === 'at_risk' ? 'hivis' : 'survey') },
+        text: String(r.conclusions.verdict).replace(/_/g, ' '),
       }) : null,
     ]),
-    el('span', { class: 'xs dim num', text: `${rep.providerLabel} · ${rep.model} · ${T.formatTokens(rep.tokens.input + rep.tokens.output)} tok${rep.tokens.estimated ? ' (est)' : ''}` }),
+    el('span', { class: 'xs num', text: `${rep.providerLabel} · ${T.formatTokens(rep.tokens.input + rep.tokens.output)} tok${rep.tokens.estimated ? ' est' : ''}` }),
   ]);
 
   const bodyEl = el('div', { class: 'report__body' });
   head.addEventListener('click', () => { open.v = !open.v; bodyEl.classList.toggle('hidden', !open.v); });
 
-  if (r.headline) bodyEl.appendChild(el('h3', { text: r.headline }));
-  if (r.confidenceReason) bodyEl.appendChild(el('p', { class: 'small muted', text: `Confidence ${r.confidence || '—'}: ${r.confidenceReason}` }));
-  if (r.summary) bodyEl.appendChild(el('p', { text: r.summary }));
-
+  const prose = (text) => (text ? el('div', { class: 'aiprose' }, [el('p', { text })]) : null);
   const list = (title, arr, fmt) => {
-    if (!Array.isArray(arr) || !arr.length) return;
-    bodyEl.appendChild(el('h4', { text: title }));
-    bodyEl.appendChild(el('ul', {}, arr.map((x) => el('li', { text: typeof x === 'string' ? x : fmt(x) }))));
+    if (!Array.isArray(arr) || !arr.length) return null;
+    return el('div', {}, [
+      el('h4', { style: { margin: '12px 0 4px' }, text: title }),
+      el('ul', {}, arr.map((x) => el('li', { text: typeof x === 'string' ? x : fmt(x) }))),
+    ]);
   };
-  list('What is driving it', r.whatIsDrivingIt, (x) => `${x.point} — ${x.evidence}${x.effect ? ` (${x.effect})` : ''}`);
-  list('Bottlenecks', r.bottlenecks, (x) => `${x.taskId || ''} ${x.issue}${x.whoToChase ? ` — chase ${x.whoToChase}` : ''}${x.suggestedAction ? `. ${x.suggestedAction}` : ''}`);
-  list('Site ranking', r.siteRanking, (x) => `${x.site}: ${x.standing} — ${x.why}`);
-  list('Systemic issues', r.systemicIssues, (x) => `${x.issue} (${(x.sitesAffected || []).join(', ')}) — ${x.rootCauseHypothesis}${x.fixOnceCentrally ? `. Fix centrally: ${x.fixOnceCentrally}` : ''}`);
-  list('Resource concerns', r.resourceConcerns, (x) => `${x.resource}: ${x.concern} — ${x.suggestedAction}`);
-  list('Sequencing and overlaps', r.sequencingAndOverlaps, (x) => x);
-  list('Actions', r.actions || r.priorityActions, (x) => `[${x.priority || 'action'}] ${x.action}${x.owner ? ` — ${x.owner}` : ''}${x.byWhen ? ` by ${x.byWhen}` : ''}`);
-  list('Watch next week', r.watchNextWeek, (x) => x);
-  list('Going well', r.whatIsGoingWell, (x) => x);
-  list('Data gaps', r.dataGaps, (x) => x);
+  const sec = (n, title, ...kids) => el('div', { class: 'rsec' }, [
+    el('div', { class: 'rsec__head' }, [
+      el('span', { class: 'rsec__n', text: String(n) }),
+      el('h4', { text: title }),
+    ]),
+    el('div', { class: 'rsec__body' }, kids.filter(Boolean)),
+  ]);
+  const figs = (items) => el('div', { class: 'figs' }, items.filter(Boolean).map((f) => el('div', {
+    class: 'fig', dataset: f.tone ? { tone: f.tone } : {},
+  }, [
+    el('div', { class: 'fig__k', text: f.k }),
+    el('div', { class: 'fig__v', text: f.v }),
+    f.n ? el('div', { class: 'fig__n', text: f.n }) : null,
+  ])));
 
-  bodyEl.appendChild(el('div', { class: 'row row--wrap', style: { marginTop: '12px' } }, [
-    el('button', {
-      class: 'btn btn--sm', disabled: running ? true : null,
-      onclick: () => continueReport(rep, p),
-    }, ['Continue — ask a follow-up']),
-    el('button', {
-      class: 'btn btn--sm', disabled: running ? true : null,
-      onclick: () => {
-        S.update((s) => { const n = { ...s.reports }; delete n[rep.key]; s.reports = n; });
-        toast('Report removed.');
+  /* ---- 1. Site details and introduction ---- */
+  bodyEl.appendChild(sec(1, rep.kind === 'master' ? 'Programme details' : 'Site details and introduction',
+    a ? figs([
+      { k: 'Site', v: a.code, n: a.description || undefined },
+      { k: 'Wave', v: a.wave || '—' },
+      { k: 'Coordinator', v: a.coordinator || '—' },
+      { k: 'Register status', v: a.registerStatus || '—' },
+      { k: 'Target submission', v: a.target ? fmtDate(a.target) : '—' },
+    ]) : figs([
+      { k: 'Sites', v: String(p.siteCount) },
+      { k: 'With weekly data', v: String(p.sitesWithData), tone: p.sitesWithData < p.siteCount ? 'hivis' : 'sign' },
+      { k: 'Live tasks', v: String(p.totalTasks) },
+      { k: 'Complete', v: `${p.pctByWeight}%` },
+    ]),
+    prose(r.introduction)));
+
+  /* ---- 2. Timeline ---- */
+  const tl = a?.timeline;
+  bodyEl.appendChild(sec(2, 'Timeline',
+    figs([
+      { k: 'Today', v: fmtDate(tl?.today || new Date().toISOString().slice(0, 10)) },
+      { k: 'Weeks reported', v: tl ? String(tl.weeksElapsed) : '—', n: tl?.reportingWeekLabel ? `to ${tl.reportingWeekLabel}` : undefined },
+      {
+        k: 'Weeks to target', v: tl?.weeksRemainingToTarget == null ? '—' : String(tl.weeksRemainingToTarget),
+        tone: tl?.weeksRemainingToTarget != null && tl.weeksRemainingToTarget < 0 ? 'survey' : undefined,
       },
-    }, [icon('trash', 13), 'Remove']),
-    rep.followUp ? el('span', { class: 'xs dim', text: `Asked: ${rep.followUp}` }) : null,
+      { k: 'Planned span', v: tl?.totalPlannedWeeks ? `${tl.totalPlannedWeeks} wks` : '—', n: tl?.percentOfPlannedTimeUsed != null ? `${tl.percentOfPlannedTimeUsed}% of time used` : undefined },
+      {
+        k: 'Forecast', v: a && a.forecastRecent ? `${a.forecastRecent.weeksNeeded} wks more` : '—',
+        n: a?.forecastRecent?.finishDate ? fmtDate(a.forecastRecent.finishDate) : undefined,
+        tone: a?.slipWeeks > 0 ? 'survey' : undefined,
+      },
+      {
+        k: 'Against target', v: a?.slipWeeks == null ? '—' : (a.slipWeeks > 0 ? `+${a.slipWeeks}w late` : `${Math.abs(a.slipWeeks)}w spare`),
+        tone: a?.slipWeeks > 0 ? 'survey' : 'sign',
+      },
+    ]),
+    rep.periodContext?.previousAnalysisDate || rep.periodContext?.reviewLabel
+      ? el('p', { class: 'small muted', text: `Previous analysis: ${rep.periodContext.previousAnalysisDate ? fmtDate(rep.periodContext.previousAnalysisDate) : 'not recorded'}${rep.periodContext.previousWeekCovered ? `, covering ${rep.periodContext.previousWeekCovered}` : ''}.` })
+      : el('p', { class: 'small muted', text: 'No previous analysis recorded for comparison.' }),
+    prose(r.timelineNote)));
+
+  /* ---- 3. Task status ---- */
+  bodyEl.appendChild(sec(3, 'Task status',
+    a ? figs([
+      { k: 'Total tasks', v: String(a.taskCount), n: a.naCount ? `${a.naCount} marked N/A` : undefined },
+      { k: 'Live', v: String(a.liveCount) },
+      { k: 'Completed', v: String(a.finishedCount), tone: 'sign' },
+      { k: 'Pending', v: String(a.remaining), tone: a.remaining ? 'hivis' : 'sign' },
+      { k: 'In progress', v: String(a.wipCount) },
+      { k: 'Not started', v: String(a.notStartedCount) },
+      { k: 'Complete', v: `${a.pctByWeight}%`, n: `${a.pctByCount}% by count` },
+      { k: 'Rate', v: `${a.recentVelocity}/wk`, n: `all-time ${a.avgVelocity}/wk` },
+    ]) : figs([
+      { k: 'Live tasks', v: String(p.totalTasks) },
+      { k: 'Completed', v: String(p.totalDone), tone: 'sign' },
+      { k: 'Pending', v: String(p.totalTasks - p.totalDone), tone: 'hivis' },
+      { k: 'Past target week', v: String(p.totalOverdue), tone: p.totalOverdue ? 'survey' : 'sign' },
+      { k: 'Added after kickoff', v: String(p.totalAdditional) },
+    ]),
+    prose(r.taskStatusInterpretation),
+    a && a.overdue?.length
+      ? list(`Past their target week (${a.overdue.length})`, a.overdue.slice(0, 10),
+          (x) => `${x.taskId} ${x.name} — target ${x.targetWeek}, ${x.weeksLate}w late, ${x.status}`)
+      : null,
+    a && a.scopeGrowth?.additionalCount
+      ? list(`Added after kickoff (${a.scopeGrowth.additionalCount}, ${a.scopeGrowth.growthPct}% growth)`, a.scopeGrowth.items.slice(0, 8),
+          (x) => `${x.taskId} ${x.name}${x.added ? ` — added ${fmtDate(x.added)}` : ''}`)
+      : null));
+
+  /* ---- 4. Prerequisites ---- */
+  const pre = a?.prereqs || [];
+  const preOut = a?.outstandingPrereqs || [];
+  bodyEl.appendChild(sec(4, 'Prerequisites',
+    figs([
+      { k: 'Total', v: String(pre.length) },
+      { k: 'Received', v: String(Math.max(0, pre.length - preOut.length)), tone: 'sign' },
+      { k: 'Outstanding', v: String(preOut.length), tone: preOut.length ? 'hivis' : 'sign' },
+      { k: 'Overdue', v: String(preOut.filter((x) => x.overdue).length), tone: preOut.some((x) => x.overdue) ? 'survey' : 'sign' },
+      { k: 'Tasks held up', v: String(preOut.reduce((n, x) => n + x.blocksCount, 0)), tone: 'hivis' },
+    ]),
+    prose(r.prerequisiteInterpretation),
+    list('Outstanding', preOut, (x) => `${x.id} ${x.name} — from ${x.provider || 'not recorded'}${x.byWeek ? `, required by week ${x.byWeek}` : ''}${x.overdue ? ' (OVERDUE)' : ''}, holding up ${x.blocksCount} task${x.blocksCount === 1 ? '' : 's'}`)));
+
+  /* ---- 5. Waiting on / blocked ---- */
+  const stuck = a?.stuckDetail || [];
+  bodyEl.appendChild(sec(5, 'Waiting on and blocked',
+    figs([
+      { k: 'Stuck now', v: String(a ? a.stuckCount : p.totalStuck), tone: (a ? a.stuckCount : p.totalStuck) ? 'survey' : 'sign' },
+      { k: 'Blocked', v: String(a?.blockedCount ?? '—'), n: 'inside your control' },
+      { k: 'Waiting on', v: String(a?.waitingCount ?? '—'), n: 'outside it' },
+      { k: 'Longest', v: stuck.length ? `${stuck[0].weeksStuck}w` : '—', n: stuck.length ? stuck[0].taskId : undefined, tone: stuck[0]?.weeksStuck >= 3 ? 'survey' : undefined },
+      { k: 'Open log entries', v: String((a?.openLog || []).length) },
+    ]),
+    prose(r.blockedInterpretation),
+    list('Currently stuck', stuck.slice(0, 12),
+      (x) => `${x.taskId} ${x.name} — ${x.status} ${x.weeksStuck}w${x.waitingOn ? `, on ${x.waitingOn}` : ''}${x.reason ? `: ${x.reason}` : ' (no reason logged)'}`),
+    a && a.stalled?.length
+      ? list(`Stalled in WIP (${a.stalled.length})`, a.stalled.slice(0, 8), (x) => `${x.taskId} ${x.name} — ${x.weeksInWip} weeks in WIP with no change`)
+      : null));
+
+  /* ---- 6. Additional interpretations ---- */
+  const add = r.additional || {};
+  bodyEl.appendChild(sec(6, 'Additional interpretations',
+    a && a.risks?.length
+      ? el('div', {}, [
+          el('h4', { style: { margin: '0 0 4px' }, text: 'Computed by the app' }),
+          el('ul', {}, a.risks.slice(0, 8).map((x) => el('li', { text: `[${x.level}] ${x.title} — ${x.detail}` }))),
+        ])
+      : null,
+    !a && p.risks?.length
+      ? el('div', {}, [
+          el('h4', { style: { margin: '0 0 4px' }, text: 'Computed by the app' }),
+          el('ul', {}, p.risks.slice(0, 8).map((x) => el('li', { text: `[${x.level}] ${x.title} — ${x.detail}` }))),
+        ])
+      : null,
+    list('Risks identified in review', add.risks, (x) => `[${x.impact || '—'}] ${x.risk} — ${x.why}`),
+    list('Patterns', add.patterns, (x) => x),
+    list('Systemic issues', add.systemicIssues, (x) => `${x.issue} (${(x.sitesAffected || []).join(', ')}) — ${x.rootCauseHypothesis}${x.fixOnceCentrally ? `. Fix centrally: ${x.fixOnceCentrally}` : ''}`),
+    list('Resource concerns', add.resourceConcerns, (x) => `${x.resource}: ${x.concern} — ${x.suggestedAction}`),
+    list('Actions', add.actions, (x) => `[${x.priority || 'action'}] ${x.action}${x.owner ? ` — ${x.owner}` : ''}${x.byWhen ? ` by ${x.byWhen}` : ''}${x.expectedEffect ? `. ${x.expectedEffect}` : ''}`),
+    list('Watch next week', add.watchNextWeek, (x) => x),
+    list('Going well', add.whatIsGoingWell, (x) => x),
+    a && a.dataIssues?.length
+      ? list(`Data quality (${a.dataIssues.length})`, a.dataIssues.slice(0, 8), (x) => x.detail)
+      : null));
+
+  /* ---- 7. Visualisations ---- */
+  const charts = el('div');
+  bodyEl.appendChild(sec(7, 'Visualisation', prose(r.visualisationNote), charts));
+  queueMicrotask(() => drawReportCharts(charts, a, p));
+
+  /* ---- 8. Conclusions ---- */
+  const c = r.conclusions || {};
+  bodyEl.appendChild(sec(8, 'Conclusions',
+    el('div', { class: 'row row--wrap', style: { gap: '6px', marginBottom: '10px' } }, [
+      c.verdict ? el('span', {
+        class: 'chip',
+        dataset: { tone: c.verdict === 'on_track' ? 'sign' : (c.verdict === 'at_risk' ? 'hivis' : 'survey') },
+        text: String(c.verdict).replace(/_/g, ' '),
+      }) : null,
+      c.confidence ? el('span', { class: 'chip', dataset: { tone: 'conc' }, text: `${c.confidence} confidence` }) : null,
+    ]),
+    c.confidenceReason ? el('p', { class: 'small muted', text: c.confidenceReason }) : null,
+    prose(c.statement),
+    list('Before the next review', c.nextSteps, (x) => x)));
+
+  /* ---- footer ---- */
+  bodyEl.appendChild(el('div', { class: 'rsec' }, [
+    el('div', { class: 'rsec__body row row--wrap' }, [
+      el('button', { class: 'btn btn--sm', disabled: running ? true : null, onclick: () => continueReport(rep, p) }, ['Continue — ask a follow-up']),
+      el('button', {
+        class: 'btn btn--sm', disabled: running ? true : null,
+        onclick: () => { S.update((x) => { const n = { ...x.reports }; delete n[rep.key]; x.reports = n; }); toast('Report removed.'); },
+      }, [icon('trash', 13), 'Remove']),
+      el('span', { class: 'grow' }),
+      el('span', { class: 'xs dim', text: `${rep.model} · ${fmtDate((rep.at || '').slice(0, 10))}${rep.followUp ? ` · asked: ${rep.followUp}` : ''}` }),
+    ]),
   ]));
 
   mount(wrap, head, bodyEl);
   return wrap;
+}
+
+/** Charts for a report. Site reports get the full set; the master gets the comparison. */
+function drawReportCharts(host, a, p) {
+  const add = (fn, ...args) => {
+    const h = el('div');
+    host.appendChild(h);
+    try { fn(h, ...args); } catch (e) { console.error('chart failed', e); h.remove(); }
+  };
+  if (!a) {
+    add(renderSiteBars, p.sites);
+    add(renderResourceLoad, p.resourceLoad, { showSites: true });
+    return;
+  }
+  if (a.noData) {
+    mount(host, el('div', { class: 'empty' }, [
+      el('h3', { text: 'Nothing to plot' }),
+      el('p', { text: 'This site has no weekly status recorded, so there is no trend, no throughput and no grid to draw.' }),
+    ]));
+    return;
+  }
+  add(renderStatusMix, a);
+  add(renderCurve, a.curve);
+  add(renderThroughput, a.velocity);
+  add(renderCategoryProgress, a.categories);
+  if (a.stuckDetail.length) add(renderBlockerAges, a.stuckDetail);
+  add(renderResourceLoad, a.resources);
+  add(renderStatusGrid, a, { maxRows: 60 });
 }
 
 function continueReport(rep, p) {
@@ -534,9 +819,10 @@ function continueReport(rep, p) {
         currentKey = rep.key;
         render();
         try {
-          const payload = rep.key === MASTER
-            ? buildMasterPayload(p)
-            : buildSitePayload(p.sites.find((s) => s.code === rep.key));
+          const payload = withPeriod(
+            rep.key === MASTER ? buildMasterPayload(p) : buildSitePayload(p.sites.find((s) => s.code === rep.key)),
+            rep.key,
+          );
           const next = await runAI({
             kind: rep.kind, payload, settings: S.get().settings,
             followUp: q, signal: controller.signal,
@@ -561,9 +847,10 @@ function showPayload(key, asConfirm = false, total = 1) {
   return new Promise((resolve) => {
     const p = portfolio();
     const st = S.get();
-    const payload = key === MASTER
-      ? buildMasterPayload(p)
-      : buildSitePayload(p.sites.find((s) => s.code === key));
+    const payload = withPeriod(
+      key === MASTER ? buildMasterPayload(p) : buildSitePayload(p.sites.find((s) => s.code === key)),
+      key,
+    );
     const pv = previewPayload({
       kind: key === MASTER ? 'master' : 'site',
       payload, settings: st.settings,
@@ -600,116 +887,92 @@ function showPayload(key, asConfirm = false, total = 1) {
    Right rail — deterministic dashboard + token meter
    ======================================================================== */
 
+/**
+ * The fixed rail. Usage against your limits and where every site stands are the
+ * two things worth glancing at constantly, so they never scroll away with the
+ * work column.
+ */
 function renderRail() {
   const st = S.get();
   const p = portfolio();
-  const nodes = [];
-
-  nodes.push(tokenRail(st));
+  const nodes = [usageCard(st)];
 
   if (p && st.confirmed) {
-    const bars = el('div');
-    nodes.push(el('div', { class: 'sheet' }, [
-      el('div', { class: 'sheet__head' }, [el('h3', { text: 'Site progress' }), el('span', { class: 'xs dim', text: 'computed' })]),
-      el('div', { class: 'sheet__body' }, [bars]),
+    nodes.push(el('div', { class: 'railcard' }, [
+      el('div', { class: 'railcard__head' }, [
+        el('h3', { text: 'Site progress' }),
+        el('span', { class: 'tag', text: 'computed' }),
+      ]),
+      ...p.sites.map((s) => el('div', { class: 'railsite' }, [
+        el('span', { class: 'code', text: s.code }),
+        el('div', { class: 'track' }, [
+          el('div', { style: { width: `${s.noData ? 0 : clamp(s.pctByWeight, 0, 100)}%`, background: s.slipWeeks > 0 ? 'var(--survey)' : 'var(--sign)' } }),
+        ]),
+        el('span', {
+          class: `val${s.slipWeeks > 0 ? ' late' : ''}`,
+          text: s.noData ? '—' : `${Math.round(s.pctByWeight)}%`,
+        }),
+      ])),
+      el('div', { class: 'railnote', style: { marginTop: '8px' } }, [
+        `${p.totalDone} of ${p.totalTasks} tasks complete across ${p.sitesWithData} measured site${p.sitesWithData === 1 ? '' : 's'}.`,
+      ]),
     ]));
-    renderSiteBars(bars, p.sites);
 
     if (p.risks.length) {
-      nodes.push(el('div', { class: 'sheet' }, [
-        el('div', { class: 'sheet__head' }, [el('h3', { text: 'Computed risks' }), el('span', { class: 'badge', dataset: { tone: p.risks.some((r) => r.level === 'high') ? 'survey' : 'hivis' }, text: String(p.risks.length) })]),
-        el('div', { class: 'sheet__body sheet__body--flush' }, [
-          el('ul', { class: 'register' }, p.risks.slice(0, 8).map((r) => el('li', { class: 'register__item', dataset: { sev: r.level } }, [
-            el('div', { class: 'register__spine' }),
-            el('div', { class: 'register__body' }, [
-              el('div', { class: 'register__title', text: r.title }),
-              el('div', { class: 'register__detail', text: r.detail }),
-            ]),
-          ]))),
+      nodes.push(el('div', { class: 'railcard' }, [
+        el('div', { class: 'railcard__head' }, [
+          el('h3', { text: 'Computed risks' }),
+          el('span', { class: 'tag', text: String(p.risks.length) }),
         ]),
+        ...p.risks.slice(0, 5).map((r) => el('div', { style: { marginBottom: '9px' } }, [
+          el('div', {
+            style: {
+              fontSize: 'var(--t-xs)', fontWeight: '600',
+              color: r.level === 'high' ? '#FF9C9C' : '#FFD27A', lineHeight: '1.35',
+            },
+            text: r.title,
+          }),
+          el('div', { class: 'railnote', text: r.detail.length > 130 ? `${r.detail.slice(0, 128)}…` : r.detail }),
+        ])),
       ]));
-    }
-
-    const firstWithData = p.sites.find((s) => !s.noData);
-    if (firstWithData) {
-      const curveHost = el('div');
-      const thruHost = el('div');
-      const sel = el('select', { class: 'select', style: { maxWidth: '130px' } },
-        p.sites.filter((s) => !s.noData).map((s) => el('option', { value: s.code, text: s.code })));
-      const draw = () => {
-        const s = p.sites.find((x) => x.code === sel.value) || firstWithData;
-        renderCurve(curveHost, s.curve);
-        renderThroughput(thruHost, s.velocity);
-      };
-      sel.addEventListener('change', draw);
-      nodes.push(el('div', { class: 'sheet' }, [
-        el('div', { class: 'sheet__head' }, [el('h3', { text: 'Timeline' }), el('span', { class: 'grow' }), sel]),
-        el('div', { class: 'sheet__body' }, [curveHost, el('h4', { text: 'Finished per week', style: { marginTop: '12px' } }), thruHost]),
-      ]));
-      queueMicrotask(draw);
     }
   }
 
   mount(rail, ...nodes);
 }
 
-function tokenRail(st) {
+function usageCard(st) {
   const usage = T.getUsage();
   const win = T.requestWindows(st.settings.provider);
   const lim = T.getLimits(st.settings.provider);
-  const reasons = T.recentRequestReasons();
 
-  const bar = (used, max, tone) => {
-    const p = max ? clamp((used / max) * 100, 0, 100) : 0;
-    return el('div', { class: 'meter', style: { marginTop: '3px' } }, [
-      el('div', { class: 'meter__fill', dataset: { tone: p > 85 ? 'survey' : (p > 60 ? 'hivis' : tone) }, style: { width: `${p}%` } }),
-    ]);
+  const bar = (used, max) => {
+    const pc = max ? clamp((used / max) * 100, 0, 100) : 0;
+    return el('div', {
+      class: 'railbar',
+      dataset: { tone: pc > 85 ? 'survey' : (pc > 60 ? 'hivis' : 'blueprint') },
+    }, [el('div', { style: { width: `${pc}%` } })]);
   };
 
-  return el('div', { class: 'sheet' }, [
-    el('div', { class: 'sheet__head' }, [
+  return el('div', { class: 'railcard' }, [
+    el('div', { class: 'railcard__head' }, [
       el('h3', { text: 'Usage' }),
-      el('span', { class: 'grow' }),
-      el('span', { class: 'xs dim', text: PROVIDERS[st.settings.provider]?.label || st.settings.provider }),
+      el('span', { class: 'tag', text: PROVIDERS[st.settings.provider]?.label || st.settings.provider }),
     ]),
-    el('div', { class: 'sheet__body stack', style: { gap: '10px' } }, [
-      el('div', {}, [
-        el('div', { class: 'row row--between xs' }, [
-          el('span', { class: 'dim', text: 'Requests this minute' }),
-          el('span', { class: 'num', text: `${win.lastMinute}${lim.rpm ? ` / ${lim.rpm}` : ''}` }),
-        ]),
-        lim.rpm ? bar(win.lastMinute, lim.rpm, 'blueprint') : null,
-        win.lastMinute && lim.rpm && win.lastMinute >= lim.rpm
-          ? el('div', { class: 'xs', style: { color: 'var(--survey)' }, text: `Capacity returns in about ${win.nextMinuteSlotIn}s` })
-          : null,
-      ]),
-      el('div', {}, [
-        el('div', { class: 'row row--between xs' }, [
-          el('span', { class: 'dim', text: 'Requests today' }),
-          el('span', { class: 'num', text: `${win.lastDay}${lim.rpd ? ` / ${lim.rpd}` : ''}` }),
-        ]),
-        lim.rpd ? bar(win.lastDay, lim.rpd, 'blueprint') : null,
-      ]),
-      el('div', { class: 'row row--between xs' }, [
-        el('span', { class: 'dim', text: 'Tokens used (all time)' }),
-        el('span', { class: 'num', text: `${T.formatTokens(usage.total)}${usage.estimated ? ' est' : ''}` }),
-      ]),
-      el('div', { class: 'row row--between xs' }, [
-        el('span', { class: 'dim', text: 'In / out' }),
-        el('span', { class: 'num', text: `${T.formatTokens(usage.input)} / ${T.formatTokens(usage.output)}` }),
-      ]),
-      el('div', { class: 'row row--between xs' }, [
-        el('span', { class: 'dim', text: 'Calls made' }),
-        el('span', { class: 'num', text: String(usage.calls) }),
-      ]),
-      reasons.length > 1
-        ? el('div', { class: 'xs dim', text: `Recent requests: ${reasons.map((r) => `${r.n}× ${r.reason}`).join(', ')} — retries count against your limit too.` })
-        : null,
-      el('div', { class: 'xs dim', text: `${lim.label}${lim.isDefault ? ' (default figures — edit in Settings to match your account)' : ' (your figures)'}` }),
-      el('div', { class: 'row', style: { gap: '6px' } }, [
-        el('button', { class: 'btn btn--sm', onclick: () => { T.resetUsage(); render(); toast('Token counter reset.'); } }, ['Reset tokens']),
-        el('button', { class: 'btn btn--sm', onclick: () => { T.resetRequests(st.settings.provider); render(); toast('Request counter reset.'); } }, ['Reset requests']),
-      ]),
+    el('div', { class: 'railrow' }, [el('span', { text: 'Requests this minute' }), el('strong', { text: `${win.lastMinute} / ${lim.rpm ?? '—'}` })]),
+    lim.rpm ? bar(win.lastMinute, lim.rpm) : null,
+    win.lastMinute && lim.rpm && win.lastMinute >= lim.rpm
+      ? el('div', { class: 'railnote', style: { color: '#FF9C9C', marginBottom: '8px' }, text: `Capacity returns in about ${win.nextMinuteSlotIn}s` })
+      : null,
+    el('div', { class: 'railrow' }, [el('span', { text: 'Requests today' }), el('strong', { text: `${win.lastDay} / ${lim.rpd ?? '—'}` })]),
+    lim.rpd ? bar(win.lastDay, lim.rpd) : null,
+    el('div', { class: 'railrow' }, [el('span', { text: 'Tokens used' }), el('strong', { text: `${T.formatTokens(usage.total)}${usage.estimated ? ' est' : ''}` })]),
+    el('div', { class: 'railrow' }, [el('span', { text: 'In / out' }), el('strong', { text: `${T.formatTokens(usage.input)} / ${T.formatTokens(usage.output)}` })]),
+    el('div', { class: 'railrow' }, [el('span', { text: 'Calls made' }), el('strong', { text: String(usage.calls) })]),
+    el('div', { class: 'railnote', style: { marginTop: '8px' }, text: `${lim.label}${lim.isDefault ? ' — default figures, edit in Settings to match your account' : ''}` }),
+    el('div', { class: 'row', style: { gap: '6px', marginTop: '10px' } }, [
+      el('button', { class: 'btn btn--sm', onclick: () => { T.resetUsage(); render(); } }, ['Reset tokens']),
+      el('button', { class: 'btn btn--sm', onclick: () => { T.resetRequests(st.settings.provider); render(); } }, ['Reset requests']),
     ]),
   ]);
 }

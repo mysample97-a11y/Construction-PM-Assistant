@@ -1,82 +1,97 @@
 /* ============================================================
-   Design tokens — "drawing office"
-   Palette drawn from technical drawing sheets and site signage:
-   cool drafting paper, ink navy, blueprint blue for action, and
-   the hi-vis / survey-red / sign-green vocabulary of a live site.
+   Design tokens — indigo/violet professional theme.
+
+   The variable NAMES are unchanged from the previous palette on purpose: every
+   component stylesheet and view already refers to them, so re-theming is a
+   values-only change and nothing can drift out of sync.
    ============================================================ */
 
 :root {
   /* --- surfaces --- */
-  --paper:      #E9EDF1;   /* app shell: cool drafting paper */
-  --paper-deep: #DCE3EA;   /* recessed areas, table stripes */
-  --sheet:      #FDFEFF;   /* content sheets */
-  --sheet-alt:  #F4F7F9;
-  --block:      #12212F;   /* title block / rail: drafting ink */
-  --block-2:    #1B3145;
+  --paper:      #EFEDFB;   /* page background: soft violet, not white */
+  --paper-deep: #E3DFF8;   /* recessed areas, hover states */
+  --sheet:      #FFFFFF;   /* working panels stay white for readability */
+  --sheet-alt:  #F7F5FE;   /* panel headers, table headers */
+  --block:      #241E58;   /* fixed left rail */
+  --block-2:    #332B76;   /* rail hover / raised areas inside the rail */
+  --block-3:    #1A1544;   /* deepest, for the rail's own recesses */
 
   /* --- ink --- */
-  --ink:        #0E1A26;
-  --ink-2:      #47586A;
-  --ink-3:      #7A8896;
-  --ink-inv:    #E7EEF4;
-  --ink-inv-2:  #9DB1C4;
+  --ink:        #1E1B36;
+  --ink-2:      #4A4570;
+  --ink-3:      #7C769D;
+  --ink-inv:    #EAE7FB;
+  --ink-inv-2:  #ABA3DB;
 
-  /* --- rules (hairlines do the structural work here) --- */
-  --rule:       #C6D0DA;
-  --rule-soft:  #DFE6EC;
-  --rule-hard:  #93A3B3;
-  --rule-inv:   #2C4560;
+  /* --- rules: violet-tinted so dividers belong to the theme --- */
+  --rule:       #D9D4F3;
+  --rule-soft:  #EAE7FA;
+  --rule-hard:  #B5ACE9;
+  --rule-inv:   #3C3486;
 
-  /* --- action --- */
-  --blueprint:    #1B4F8A;
-  --blueprint-lo: #E2ECF7;
-  --blueprint-hi: #2E6DB4;
+  /* --- primary action --- */
+  --blueprint:    #5B4FE9;
+  --blueprint-lo: #EDEBFD;
+  --blueprint-hi: #4A3FD6;
 
-  /* --- status semantics (site signage) --- */
-  --sign:      #1B6B4F;   /* on track / complete */
-  --sign-lo:   #DFF0E8;
-  --hivis:     #C97E05;   /* at risk / watch */
-  --hivis-lo:  #FCF0D9;
-  --survey:    #A82316;   /* critical / slipped / breach */
-  --survey-lo: #FBE4E1;
-  --conc:      #7E8B99;   /* not started / dormant */
-  --conc-lo:   #E8ECF0;
-  --plum:      #5B3E86;   /* forecast / AI-derived, kept distinct from status */
-  --plum-lo:   #EDE6F7;
+  /* --- status semantics, tuned to sit beside violet --- */
+  --sign:      #0E9F6E;
+  --sign-lo:   #E2F7EF;
+  --hivis:     #C2740A;
+  --hivis-lo:  #FCF2DF;
+  --survey:    #DC2626;
+  --survey-lo: #FDEAEA;
+  --conc:      #7C769D;
+  --conc-lo:   #ECEAF7;
+  --plum:      #8B5CF6;
+  --plum-lo:   #F2EDFE;
 
-  /* --- discipline keys (used on the programme bars) --- */
-  --d-design:      #2E6DB4;
-  --d-bim:         #5B3E86;
-  --d-procurement: #C97E05;
-  --d-construction:#1B6B4F;
+  /* --- status keys used on the weekly grid and legends --- */
+  --st-not:     #C3BEDF;
+  --st-wip:     #5B4FE9;
+  --st-blocked: #DC2626;
+  --st-waiting: #C2740A;
+  --st-done:    #0E9F6E;
+  --st-na:      #E6E3F2;
+
+  /* --- discipline keys --- */
+  --d-design:      #5B4FE9;
+  --d-bim:         #8B5CF6;
+  --d-procurement: #C2740A;
+  --d-construction:#0E9F6E;
   --d-commission:  #0E7C8B;
-  --d-hse:         #A82316;
-  --d-other:       #7E8B99;
+  --d-hse:         #DC2626;
+  --d-other:       #7C769D;
 
-  /* --- type --- */
-  --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+  /* --- type ---
+     Segoe UI leads because most of the intended users are on Windows; the rest
+     of the stack covers macOS and Linux with the nearest equivalent. Nothing is
+     fetched from a font CDN, so the app still makes no third-party request. */
+  --font-ui: "Segoe UI", -apple-system, BlinkMacSystemFont, "Inter", Roboto,
              "Helvetica Neue", Arial, sans-serif;
-  --font-data: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
-               "Liberation Mono", monospace;
-  --font-block: "Arial Narrow", "Helvetica Neue", "Segoe UI", sans-serif;
+  --font-data: "Cascadia Mono", ui-monospace, SFMono-Regular, Consolas,
+               "Liberation Mono", Menlo, monospace;
+  --font-block: "Segoe UI Semibold", "Segoe UI", system-ui, sans-serif;
 
-  /* Type scale — 1.25 ratio off a 15px base, tuned for dense tables */
-  --t-xs:   11px;
-  --t-sm:   12.5px;
-  --t-base: 14px;
-  --t-md:   16px;
-  --t-lg:   20px;
-  --t-xl:   26px;
-  --t-2xl:  34px;
+  /* Scale raised roughly one step throughout for readability on a dense screen.
+     Base was 14px; 15.5px is noticeably easier to read for long sessions
+     without forcing any panel to reflow. */
+  --t-xs:   12px;
+  --t-sm:   13.5px;
+  --t-base: 15.5px;
+  --t-md:   17px;
+  --t-lg:   21px;
+  --t-xl:   27px;
+  --t-2xl:  35px;
   --t-3xl:  46px;
 
-  --lh-tight: 1.15;
-  --lh-body:  1.55;
+  --lh-tight: 1.25;
+  --lh-body:  1.6;
 
   /* --- geometry --- */
-  --r-sm: 2px;
-  --r-md: 4px;
-  --r-lg: 6px;
+  --r-sm: 3px;
+  --r-md: 7px;
+  --r-lg: 11px;
 
   --s-1: 4px;
   --s-2: 8px;
@@ -87,23 +102,22 @@
   --s-7: 48px;
   --s-8: 64px;
 
-  --rail-w: 216px;
-  --bar-h: 56px;
+  --rail-w: 330px;
 
-  --shadow-sheet: 0 1px 0 var(--rule-soft), 0 1px 3px rgba(14, 26, 38, 0.06);
-  --shadow-pop: 0 8px 28px rgba(14, 26, 38, 0.18);
+  --shadow-sheet: 0 1px 2px rgba(36, 30, 88, 0.05), 0 4px 14px rgba(36, 30, 88, 0.05);
+  --shadow-pop:   0 12px 40px rgba(26, 21, 68, 0.28);
 
-  --grid-line: rgba(27, 79, 138, 0.055);
+  --grid-line: rgba(91, 79, 233, 0.05);
 }
 
-/* Setting-out grid: the faint 8mm drafting grid behind the shell.
-   Purely structural reference, never decorative flourish. */
+/* Faint grid behind the page, kept very low contrast so it reads as texture
+   rather than decoration. */
 .grid-field {
   background-color: var(--paper);
   background-image:
     linear-gradient(var(--grid-line) 1px, transparent 1px),
     linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
-  background-size: 32px 32px, 32px 32px;
+  background-size: 34px 34px, 34px 34px;
 }
 
 @media (prefers-reduced-motion: reduce) {

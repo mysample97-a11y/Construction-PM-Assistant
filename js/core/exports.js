@@ -12,6 +12,7 @@
  */
 
 import { downloadBlob, fmtDate } from './util.js';
+import { chartsToHTML } from './charts.js';
 
 /* ================================ Excel ================================ */
 
@@ -173,6 +174,12 @@ export function reportBlocks(portfolio, reports) {
     if (s.noData) {
       b.push({ style: 'p', text: 'No weekly data for this site. It appears in the register only.' });
     } else {
+      const tl = s.timeline || {};
+      b.push({ style: 'h3', text: 'Computed figures' });
+      b.push({ style: 'bullet', text: `Timeline: week ${tl.weeksElapsed || '-'} of ${tl.totalPlannedWeeks || '-'} planned; ${tl.weeksRemainingToTarget == null ? 'no target' : `${tl.weeksRemainingToTarget} weeks to target`}.` });
+      b.push({ style: 'bullet', text: `Tasks: ${s.taskCount} total, ${s.naCount} N/A, ${s.liveCount} live, ${s.finishedCount} complete, ${s.remaining} pending.` });
+      b.push({ style: 'bullet', text: `Prerequisites: ${(s.prereqs || []).length} total, ${(s.outstandingPrereqs || []).length} outstanding, ${(s.outstandingPrereqs || []).filter((x) => x.overdue).length} overdue.` });
+      b.push({ style: 'bullet', text: `Blocked or waiting: ${s.stuckCount} (${s.blockedCount} blocked, ${s.waitingCount} waiting on).` });
       b.push({ style: 'p', text: `${s.finishedCount} of ${s.liveCount} tasks finished (${s.pctByWeight}% by weight). Recent rate ${s.recentVelocity} tasks/week. ${s.remaining} remaining. ${s.forecastRecent ? `At that rate about ${s.forecastRecent.weeksNeeded} more weeks, landing near ${s.forecastRecent.finishDate || `week ${s.forecastRecent.finishWeek}`}.` : 'No completions recorded, so no forecast is possible.'}${s.slipWeeks !== null ? ` That is ${s.slipWeeks > 0 ? `${s.slipWeeks} weeks past` : `${Math.abs(s.slipWeeks)} weeks inside`} the target of ${s.target}.` : ''}` });
       if (s.stuckDetail.length) {
         b.push({ style: 'h3', text: 'Blocked and waiting' });
@@ -194,27 +201,42 @@ export function reportBlocks(portfolio, reports) {
   return b;
 }
 
+/** Renders an AI result in the same eight sections the screen uses. */
 function aiBlocks(r) {
   const b = [];
   if (!r) return b;
-  if (r.headline) b.push({ style: 'h3', text: r.headline });
-  if (r.verdict) b.push({ style: 'meta', text: `Verdict: ${String(r.verdict).replace(/_/g, ' ')}${r.confidence ? ` · confidence ${r.confidence}` : ''}${r.confidenceReason ? ` — ${r.confidenceReason}` : ''}` });
-  if (r.summary) b.push({ style: 'p', text: r.summary });
   const list = (title, arr, fmt) => {
     if (!Array.isArray(arr) || !arr.length) return;
     b.push({ style: 'h3', text: title });
     for (const x of arr) b.push({ style: 'bullet', text: typeof x === 'string' ? x : fmt(x) });
   };
-  list('What is driving it', r.whatIsDrivingIt, (x) => `${x.point} — ${x.evidence}${x.effect ? ` (${x.effect})` : ''}`);
-  list('Bottlenecks', r.bottlenecks, (x) => `${x.taskId || ''} ${x.issue}${x.whoToChase ? ` — chase ${x.whoToChase}` : ''}${x.suggestedAction ? `. ${x.suggestedAction}` : ''}`);
-  list('Site ranking', r.siteRanking, (x) => `${x.site}: ${x.standing} — ${x.why}`);
-  list('Systemic issues', r.systemicIssues, (x) => `${x.issue} (${(x.sitesAffected || []).join(', ')}) — ${x.rootCauseHypothesis}${x.fixOnceCentrally ? `. Fix: ${x.fixOnceCentrally}` : ''}`);
-  list('Resource concerns', r.resourceConcerns, (x) => `${x.resource}: ${x.concern} — ${x.suggestedAction}`);
-  list('Sequencing and overlaps', r.sequencingAndOverlaps, (x) => x);
-  list('Actions', r.actions || r.priorityActions, (x) => `[${x.priority || 'action'}] ${x.action}${x.owner ? ` — ${x.owner}` : ''}${x.byWhen ? ` by ${x.byWhen}` : ''}${x.expectedEffect ? `. ${x.expectedEffect}` : ''}`);
-  list('Watch next week', r.watchNextWeek, (x) => x);
-  list('Going well', r.whatIsGoingWell, (x) => x);
-  list('Data gaps', r.dataGaps, (x) => x);
+  const para = (title, text) => { if (text) { b.push({ style: 'h3', text: title }); b.push({ style: 'p', text }); } };
+
+  para('1. Introduction', r.introduction);
+  para('2. Timeline', r.timelineNote);
+  para('3. Task status', r.taskStatusInterpretation);
+  para('4. Prerequisites', r.prerequisiteInterpretation);
+  para('5. Waiting on and blocked', r.blockedInterpretation);
+
+  const add = r.additional || {};
+  if (Object.values(add).some((v) => Array.isArray(v) && v.length)) b.push({ style: 'h3', text: '6. Additional interpretations' });
+  list('Risks', add.risks, (x) => `[${x.impact || '-'}] ${x.risk} - ${x.why}`);
+  list('Patterns', add.patterns, (x) => x);
+  list('Systemic issues', add.systemicIssues, (x) => `${x.issue} (${(x.sitesAffected || []).join(', ')}) - ${x.rootCauseHypothesis}${x.fixOnceCentrally ? `. Fix centrally: ${x.fixOnceCentrally}` : ''}`);
+  list('Resource concerns', add.resourceConcerns, (x) => `${x.resource}: ${x.concern} - ${x.suggestedAction}`);
+  list('Actions', add.actions, (x) => `[${x.priority || 'action'}] ${x.action}${x.owner ? ` - ${x.owner}` : ''}${x.byWhen ? ` by ${x.byWhen}` : ''}${x.expectedEffect ? `. ${x.expectedEffect}` : ''}`);
+  list('Watch next week', add.watchNextWeek, (x) => x);
+  list('Going well', add.whatIsGoingWell, (x) => x);
+
+  para('7. Visualisation', r.visualisationNote);
+
+  const c = r.conclusions || {};
+  if (c.statement || c.verdict) {
+    b.push({ style: 'h3', text: '8. Conclusions' });
+    if (c.verdict) b.push({ style: 'meta', text: `Verdict: ${String(c.verdict).replace(/_/g, ' ')}${c.confidence ? ` - confidence ${c.confidence}` : ''}${c.confidenceReason ? ` - ${c.confidenceReason}` : ''}` });
+    if (c.statement) b.push({ style: 'p', text: c.statement });
+    list('Before the next review', c.nextSteps, (x) => x);
+  }
   return b;
 }
 
@@ -228,8 +250,25 @@ export function exportWord(portfolio, reports) {
 
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
-export function buildPrintHTML(portfolio, reports) {
+/**
+ * The printable report. Charts are serialised straight out of the same
+ * renderers the screen uses, so what gets printed is what was reviewed rather
+ * than a table of numbers standing in for the visuals.
+ *
+ * `withCharts` is optional because the function is also called from the test
+ * harness, where there is no layout engine to render SVG into.
+ */
+export function buildPrintHTML(portfolio, reports, withCharts = true) {
   const blocks = reportBlocks(portfolio, reports);
+  let chartHTML = '';
+  if (withCharts && typeof document !== 'undefined') {
+    try {
+      for (const s of portfolio.sites || []) {
+        if (s.noData) continue;
+        chartHTML += `<h2>Charts — ${esc(s.code)}</h2>${chartsToHTML(s)}`;
+      }
+    } catch { chartHTML = ''; }
+  }
   const body = blocks.map((b) => {
     const t = esc(b.text);
     switch (b.style) {
@@ -249,7 +288,21 @@ export function buildPrintHTML(portfolio, reports) {
   return `<!DOCTYPE html><html><head><meta charset="utf-8">
 <title>BIM Multi-Site Delivery — Analysis Report</title>
 <style>
-  @page { margin: 18mm 16mm; }
+  @page { margin: 16mm 14mm; }
+  /* The charts are serialised SVG that refers to the app's CSS variables, so
+     the print document has to declare them or every shape renders black. */
+  :root {
+    --ink: #1E1B36; --ink-2: #4A4570; --ink-3: #7C769D;
+    --sheet: #FFFFFF; --sheet-alt: #F7F5FE;
+    --rule: #D9D4F3; --rule-soft: #EAE7FA; --rule-hard: #B5ACE9;
+    --blueprint: #5B4FE9; --blueprint-lo: #EDEBFD;
+    --sign: #0E9F6E; --hivis: #C2740A; --survey: #DC2626;
+    --conc: #7C769D; --plum: #8B5CF6;
+    --st-not: #C3BEDF; --st-wip: #5B4FE9; --st-blocked: #DC2626;
+    --st-waiting: #C2740A; --st-done: #0E9F6E; --st-na: #E6E3F2;
+    --font-ui: Arial, Helvetica, sans-serif;
+    --font-data: Consolas, monospace;
+  }
   body { font: 11pt/1.5 Arial, Helvetica, sans-serif; color: #12212F; max-width: 175mm; }
   h1 { font-size: 19pt; margin: 0 0 4pt; }
   h2 { font-size: 14pt; margin: 18pt 0 6pt; border-bottom: 1px solid #C6D0DA; padding-bottom: 3pt; page-break-after: avoid; }
@@ -259,7 +312,19 @@ export function buildPrintHTML(portfolio, reports) {
   ul { margin: 0 0 8pt; padding-left: 16pt; }
   li { margin-bottom: 3pt; page-break-inside: avoid; }
   hr { border: 0; border-top: 1px solid #C6D0DA; margin: 14pt 0; }
+  .chartwrap { margin: 0 0 14pt; page-break-inside: avoid; }
+  .charttitle { font-size: 10.5pt; font-weight: 600; margin-bottom: 1pt; }
+  .chartnote { font-size: 8.5pt; color: #5A6B7B; margin-bottom: 4pt; }
+  .chartbox svg { max-width: 100%; height: auto; }
+  .legend { display: flex; flex-wrap: wrap; gap: 10pt; font-size: 8pt; color: #4A4570; margin-top: 3pt; }
+  .legend span { display: inline-flex; align-items: center; gap: 3pt; }
+  .swatch { width: 8pt; height: 8pt; border-radius: 1pt; display: inline-block; }
+  .meter { position: relative; height: 6pt; background: #E3DFF8; border-radius: 3pt; overflow: hidden; }
+  .meter__fill { position: absolute; inset: 0 auto 0 0; background: #5B4FE9; border-radius: 3pt; }
+  .row { display: flex; align-items: center; }
+  .grow { flex: 1; }
 </style></head><body>${body}
+${chartHTML}
 <p class="meta">Site and resource codes are pseudonyms held only in the author's private reference file.</p>
 </body></html>`;
 }
