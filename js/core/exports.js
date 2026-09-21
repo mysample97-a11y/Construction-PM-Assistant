@@ -193,6 +193,15 @@ export function reportBlocks(portfolio, reports) {
       }
     }
     const rep = reports?.[s.code];
+    const ch = rep?.periodContext?.computedChange;
+    if (ch && ch.comparable) {
+      const sg = (n, u = '') => (n == null ? '-' : `${n > 0 ? '+' : ''}${n}${u}`);
+      b.push({ style: 'h3', text: 'Change since the previous week (computed)' });
+      b.push({ style: 'bullet', text: `Complete: ${sg(ch.percentChange, ' pts')} (${ch.percentByWeightThen}% to ${ch.percentByWeightNow}%).` });
+      b.push({ style: 'bullet', text: `Tasks finished: ${sg(ch.finishedChange)} (${ch.finishedThen} to ${ch.finishedNow}). Stuck: ${sg(ch.stuckChange)} (${ch.stuckThen} to ${ch.stuckNow}).` });
+      if (ch.cleared?.length) b.push({ style: 'bullet', text: `Cleared: ${ch.cleared.join(', ')}.` });
+      if (ch.newlyStuck?.length) b.push({ style: 'bullet', text: `Newly stuck: ${ch.newlyStuck.join(', ')}.` });
+    }
     if (rep) {
       b.push({ style: 'h3', text: 'Review' });
       b.push(...aiBlocks(rep.result));

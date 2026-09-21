@@ -21,10 +21,10 @@ global.window = { XLSX };
 
 const { readWorkbook, parseWorkbook, normStatus, splitIds, screenText, STATUS } =
   await import('../js/core/parser.js');
-const { analyseSite, analysePortfolio, lastReportedWeek } = await import('../js/core/engine.js');
+const { analyseSite, analysePortfolio, lastReportedWeek, compareSites, comparePortfolios } = await import('../js/core/engine.js');
 const { estimateTokens, estimateRun, capacityCheck, formatTokens, readProviderUsage } =
   await import('../js/core/tokens.js');
-const { buildSitePayload, buildMasterPayload, parseModelJson, buildPrompt } =
+const { buildSitePayload, buildMasterPayload, parseModelJson, buildPrompt, run: runAI, _setOverloadWaits } =
   await import('../js/core/ai.js');
 const { buildRTF, buildPrintHTML, buildWorkbook } = await import('../js/core/exports.js');
 const { stripSecrets } = await import('../js/core/session.js');
@@ -498,6 +498,118 @@ check('grid rows interleave categories with their tasks',
   `${tlA.gridTasks.length} rows`);
 check('every grid row carries a weekly series',
   tlA.gridTasks.every((g) => Array.isArray(g.weekly)));
+
+/* ------------- 12. week-on-week comparison is arithmetic ------------- */
+
+// Take the fixture as "this week", and build "last week" by rolling it back:
+// every status that became Finished in W06 goes back to WIP.
+const cur = analyseSite(model.sites[0], model.template);
+const prevSite = {
+  ...model.sites[0],
+  detail: {
+    ...model.sites[0].detail,
+    tasks: model.sites[0].detail.tasks.map((t) => ({
+      ...t, weekly: t.weekly.map((w, i) => (i === 5 && w === STATUS.FINISHED && t.weekly[4] !== STATUS.FINISHED ? STATUS.WIP : w)),
+    })),
+  },
+};
+const prv = analyseSite(prevSite, model.template);
+const cmp = compareSites(prv, cur);
+check('comparison is marked comparable', cmp.comparable === true);
+check('finished change is the exact difference', cmp.finishedChange === cur.finishedCount - prv.finishedCount,
+  `${cmp.finishedChange} vs ${cur.finishedCount - prv.finishedCount}`);
+check('percent change is the exact difference',
+  cmp.percentChange === Math.round((cur.pctByWeight - prv.pctByWeight) * 10) / 10, String(cmp.percentChange));
+check('both endpoints are reported, not just the delta', cmp.percentByWeightThen === prv.pctByWeight && cmp.percentByWeightNow === cur.pctByWeight);
+check('identical weeks compare as zero change', compareSites(cur, cur).finishedChange === 0 && compareSites(cur, cur).percentChange === 0);
+check('a site with no data is not compared', compareSites({ noData: true }, cur).comparable === false);
+check('a missing side returns null rather than guessing', compareSites(null, cur) === null);
+
+// stuck-set arithmetic: clearing and adding blockers
+const stuckA = { ...cur, stuckDetail: [{ taskId: 'X1' }, { taskId: 'X2' }], stuckCount: 2, noData: false };
+const stuckB = { ...cur, stuckDetail: [{ taskId: 'X2' }, { taskId: 'X3' }], stuckCount: 2, noData: false };
+const sc = compareSites(stuckA, stuckB);
+check('cleared blockers identified', sc.cleared.join() === 'X1', sc.cleared.join());
+check('newly stuck identified', sc.newlyStuck.join() === 'X3', sc.newlyStuck.join());
+check('still stuck identified', sc.stillStuck.join() === 'X2', sc.stillStuck.join());
+
+const pc = comparePortfolios(analysePortfolio(model), analysePortfolio(model));
+check('portfolio comparison covers every site', Object.keys(pc.bySite).length === model.sites.length);
+check('identical portfolios show zero change', pc.finishedChange === 0 && pc.percentChange === 0);
+
+/* ------------- 13. "(unassigned)" is not a person ------------- */
+
+const unModel = {
+  ...model,
+  sites: [0, 1, 2].map((i) => ({
+    ...model.sites[0], code: `U-0${i}`,
+    detail: { ...model.sites[0].detail, tasks: model.sites[0].detail.tasks.map((t) => ({ ...t, resource: '' })) },
+  })),
+};
+const unP = analysePortfolio(unModel);
+check('unassigned work is never reported as one person spread across sites',
+  !unP.risks.some((r) => r.code === 'resource_spread' && /unassigned/i.test(r.title)),
+  JSON.stringify(unP.risks.map((r) => r.title)));
+check('unassigned work is reported as a data gap instead',
+  unP.risks.some((r) => r.code === 'unassigned_work'), JSON.stringify(unP.risks.map((r) => r.code)));
+
+/* ------------- 14. provider errors: 503 retries, 429 does not ------------- */
+
+_setOverloadWaits([5, 5, 5, 5]);
+globalThis.localStorage = globalThis.localStorage || { _d: {}, getItem(k) { return this._d[k] ?? null; }, setItem(k, v) { this._d[k] = String(v); }, removeItem(k) { delete this._d[k]; } };
+globalThis.sessionStorage = { _d: { 'bimtrack:key': 'AIzaTEST' }, getItem(k) { return this._d[k] ?? null; }, setItem(k, v) { this._d[k] = String(v); }, removeItem(k) { delete this._d[k]; } };
+const okBody = JSON.stringify({ candidates: [{ content: { parts: [{ text: '{"introduction":"ok"}' }] } }], usageMetadata: { promptTokenCount: 5, candidatesTokenCount: 5 } });
+const resp = (status, body = '{}') => ({ ok: status < 300, status, headers: { get: () => null }, text: async () => body, json: async () => JSON.parse(body) });
+const settings = { provider: 'gemini', model: 'primary-model', maxTokens: 512 };
+const payloadMin = { site: 'F-01' };
+
+let calls = 0;
+const statuses = [];
+globalThis.fetch = async () => { calls++; return calls < 3 ? resp(503) : resp(200, okBody); };
+let rep = await runAI({ kind: 'site', payload: payloadMin, settings, onStatus: (x) => statuses.push(x) });
+check('a transient 503 is retried until it succeeds', calls === 3 && rep.result.introduction === 'ok', `calls=${calls}`);
+check('the retry reports a live countdown', statuses.some((x) => x && x.secondsLeft !== undefined && x.attempt >= 2), JSON.stringify(statuses.slice(0, 2)));
+check('the countdown is cleared on success', statuses[statuses.length - 1] === null);
+
+calls = 0;
+globalThis.fetch = async () => { calls++; return resp(503); };
+let err = null;
+try { await runAI({ kind: 'site', payload: payloadMin, settings }); } catch (e) { err = e; }
+check('a persistent 503 gives up after five attempts', calls === 5, `calls=${calls}`);
+check('the 503 message says it is the server, not your quota', /not your quota/i.test(err?.message || ''), err?.message);
+check('a persistent 503 is flagged as an overload', err?.overloaded === true);
+
+calls = 0;
+const seen = [];
+globalThis.fetch = async (url) => { calls++; seen.push(String(url)); return String(url).includes('primary-model') ? resp(503) : resp(200, okBody); };
+rep = await runAI({ kind: 'site', payload: payloadMin, settings: { ...settings, fallbackModel: 'stable-model' } });
+check('after persistent overload the fallback model is used', rep.model === 'stable-model' && rep.fellBack === true, rep.model);
+check('the report records which model was asked for', rep.requestedModel === 'primary-model');
+check('the fallback is tried only after the primary exhausts its retries', seen.filter((u) => u.includes('primary-model')).length === 5);
+
+calls = 0;
+globalThis.fetch = async () => { calls++; return resp(429); };
+err = null;
+try { await runAI({ kind: 'site', payload: payloadMin, settings: { ...settings, fallbackModel: 'stable-model' } }); } catch (e) { err = e; }
+check('a 429 is NOT retried — that would burn more quota', calls === 1, `calls=${calls}`);
+check('a 429 does not trigger the fallback model', calls === 1 && err?.status === 429);
+check('the 429 message says it is your account limit', /your account/i.test(err?.message || ''), err?.message);
+
+calls = 0;
+globalThis.fetch = async () => { calls++; return resp(404); };
+err = null;
+try { await runAI({ kind: 'site', payload: payloadMin, settings: { ...settings, fallbackModel: 'stable-model' } }); } catch (e) { err = e; }
+check('a 404 bad model name is not retried', calls === 1, `calls=${calls}`);
+
+const ctl = new AbortController();
+calls = 0;
+globalThis.fetch = async () => { calls++; if (calls === 1) setTimeout(() => ctl.abort(), 1); return resp(503); };
+_setOverloadWaits([2000, 2000, 2000, 2000]);
+err = null;
+const t0c = Date.now();
+try { await runAI({ kind: 'site', payload: payloadMin, settings, signal: ctl.signal }); } catch (e) { err = e; }
+check('cancelling during a retry wait stops immediately', err?.name === 'CancelledError' && Date.now() - t0c < 1500, `${err?.name} after ${Date.now() - t0c}ms`);
+_setOverloadWaits([5000, 12000, 25000, 45000]);
 
 /* ------------------------ 11. scale ------------------------ */
 

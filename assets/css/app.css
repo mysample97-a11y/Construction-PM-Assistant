@@ -245,3 +245,81 @@
   .rail, .step, .dropzone { display: none !important; }
   .work { margin-left: 0; padding: 0; }
 }
+
+/* ============================================================
+   Fixes and additions
+   ============================================================ */
+
+/* The old base stylesheet made #app a flex container. That turned .shell into a
+   flex item sized by its CONTENT, so the page width changed with whatever was
+   loaded — which is why reloading a workbook collapsed the layout to half the
+   screen. The page is a plain block; the rail is fixed and the work column
+   takes the rest. */
+#app { display: block; }
+.shell { display: block; width: 100%; }
+.work  { max-width: none; width: auto; box-sizing: border-box; }
+
+/* The base stylesheet caps paragraphs at 72 characters for reading width.
+   Inside the work column that left report text in a narrow strip with empty
+   space to the right, so paragraphs here use the full width of their panel. */
+.work p, .work li, .notice p { max-width: none; }
+
+/* ---------------- top bar inside the work column ---------------- */
+
+.workbar {
+  display: flex; align-items: center; gap: var(--s-3);
+  padding: var(--s-2) 0 0;
+}
+.workbar__title { font-size: var(--t-lg); font-weight: 650; color: var(--ink); }
+.workbar__sub { font-size: var(--t-xs); color: var(--ink-3); }
+.btn--clear {
+  border-color: #F3B8B8; color: var(--survey); background: var(--sheet);
+}
+.btn--clear:hover { background: var(--survey-lo); border-color: var(--survey); color: var(--survey); }
+
+/* ---------------- collapsible sections and reports ---------------- */
+
+.collapse-btn {
+  flex: 0 0 auto;
+  width: 28px; height: 28px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid var(--rule); border-radius: var(--r-md);
+  background: var(--sheet); color: var(--ink-2);
+  cursor: pointer; font-size: 12px; line-height: 1;
+  transition: transform 0.15s ease, background 0.12s ease;
+}
+.collapse-btn:hover { background: var(--blueprint-lo); border-color: var(--blueprint); color: var(--blueprint); }
+.is-collapsed .collapse-btn { transform: rotate(-90deg); }
+.step.is-collapsed > :not(.sheet__head) { display: none; }
+.step.is-collapsed .sheet__head { border-bottom: 0; }
+.report.is-collapsed .report__body { display: none; }
+.report__head .collapse-btn { background: rgba(255,255,255,0.14); border-color: rgba(255,255,255,0.3); color: #fff; }
+.report__head .collapse-btn:hover { background: rgba(255,255,255,0.26); }
+.step__summary { font-size: var(--t-xs); color: var(--ink-3); }
+
+/* ---------------- previous week ---------------- */
+
+.prevload {
+  display: grid; gap: var(--s-3);
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+@media (max-width: 900px) { .prevload { grid-template-columns: 1fr; } }
+.dropzone--small { padding: var(--s-4); }
+.dropzone--small h3 { font-size: var(--t-base); }
+.dropzone.is-loaded { border-style: solid; border-color: #B4E3D0; background: var(--sign-lo); }
+.dropzone.is-loaded-prev { border-style: solid; border-color: #DDD1FA; background: var(--plum-lo); }
+
+.delta { font-family: var(--font-data); font-size: var(--t-xs); }
+.delta--up { color: var(--sign); }
+.delta--down { color: var(--survey); }
+.delta--flat { color: var(--ink-3); }
+
+/* ---------------- retry status ---------------- */
+
+.retrybar {
+  display: flex; align-items: center; gap: var(--s-2);
+  padding: var(--s-2) var(--s-3);
+  border: 1px solid #F3D9A8; border-left: 3px solid var(--hivis);
+  background: var(--hivis-lo); border-radius: var(--r-md);
+  font-size: var(--t-sm);
+}

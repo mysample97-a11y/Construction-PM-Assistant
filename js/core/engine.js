@@ -607,7 +607,13 @@ export function analysePortfolio(model, opts = {}) {
       detail: slipping.slice(0, 5).map((s) => `${s.code} +${s.slipWeeks}w`).join(', ') + '.',
     });
   }
+  /* "(unassigned)" is the absence of a resource, not a resource. Treating it as
+     one produced "(unassigned) holds 66 open tasks across 3 sites — one person
+     cannot be the constraint on several sites", which is nonsense. Unassigned
+     work is a data gap, and is reported as one below. */
+  const UNASSIGNED = '(unassigned)';
   for (const r of resourceLoad) {
+    if (r.resource === UNASSIGNED) continue;
     if (r.siteCount > 1 && r.open >= (opts.overloadThreshold || 10)) {
       risks.push({
         level: 'medium', code: 'resource_spread',
@@ -621,6 +627,15 @@ export function analysePortfolio(model, opts = {}) {
       level: 'high', code: 'systemic_blocker',
       title: `The same blocker is holding up ${b.siteCount} sites`,
       detail: `"${b.label}" appears on ${b.sites.join(', ')}. A blocker on one site is a site problem; the same one on several is a process problem and needs fixing once, centrally.`,
+    });
+  }
+  const unassigned = resourceLoad.find((r) => r.resource === UNASSIGNED);
+  if (unassigned && unassigned.open > 0) {
+    risks.push({
+      level: unassigned.open >= 20 ? 'medium' : 'low',
+      code: 'unassigned_work',
+      title: `${unassigned.open} open task${unassigned.open === 1 ? ' has' : 's have'} no responsible resource`,
+      detail: `${unassigned.sites.map((x) => `${x.code} (${x.open})`).join(', ')}. Nobody is accountable for these, so none of them will be chased. Fill in the Responsible (R code) column.`,
     });
   }
   const noDetail = sites.filter((s) => s.noData);
@@ -650,6 +665,81 @@ export function analysePortfolio(model, opts = {}) {
     commonBlockers,
     waves: [...waves.values()],
     risks,
+  };
+}
+
+/* ========================================================================
+   Week-on-week comparison
+
+   Both sides are run through the same engine, so the change is plain
+   arithmetic between two analyses. The model is handed the result; it never
+   has to infer what moved from two blobs of prose.
+   ======================================================================== */
+
+const delta = (now, then) => (now == null || then == null ? null : Math.round((now - then) * 10) / 10);
+
+export function compareSites(prev, cur) {
+  if (!prev || !cur) return null;
+  if (prev.noData && cur.noData) return { comparable: false, reason: 'neither period has weekly status' };
+  if (prev.noData) return { comparable: false, reason: 'the previous period had no weekly status for this site' };
+  if (cur.noData) return { comparable: false, reason: 'this period has no weekly status for this site' };
+
+  const prevIds = new Set((prev.gridTasks || []).filter((t) => !t.isCategory).map((t) => t.id));
+  const curIds = new Set((cur.gridTasks || []).filter((t) => !t.isCategory).map((t) => t.id));
+  const added = [...curIds].filter((id) => !prevIds.has(id));
+  const removed = [...prevIds].filter((id) => !curIds.has(id));
+
+  const prevStuck = new Set((prev.stuckDetail || []).map((x) => x.taskId));
+  const curStuck = new Set((cur.stuckDetail || []).map((x) => x.taskId));
+
+  return {
+    comparable: true,
+    previousReportingWeek: prev.reportingWeek?.label || null,
+    currentReportingWeek: cur.reportingWeek?.label || null,
+    percentByWeightThen: prev.pctByWeight,
+    percentByWeightNow: cur.pctByWeight,
+    percentChange: delta(cur.pctByWeight, prev.pctByWeight),
+    finishedThen: prev.finishedCount,
+    finishedNow: cur.finishedCount,
+    finishedChange: delta(cur.finishedCount, prev.finishedCount),
+    stuckThen: prev.stuckCount,
+    stuckNow: cur.stuckCount,
+    stuckChange: delta(cur.stuckCount, prev.stuckCount),
+    newlyStuck: [...curStuck].filter((id) => !prevStuck.has(id)),
+    cleared: [...prevStuck].filter((id) => !curStuck.has(id)),
+    stillStuck: [...curStuck].filter((id) => prevStuck.has(id)),
+    tasksAddedSince: added.length,
+    tasksRemovedSince: removed.length,
+    forecastWeeksThen: prev.forecastRecent?.weeksNeeded ?? null,
+    forecastWeeksNow: cur.forecastRecent?.weeksNeeded ?? null,
+    slipThen: prev.slipWeeks,
+    slipNow: cur.slipWeeks,
+    slipChange: delta(cur.slipWeeks, prev.slipWeeks),
+    outstandingPrereqsThen: (prev.outstandingPrereqs || []).length,
+    outstandingPrereqsNow: (cur.outstandingPrereqs || []).length,
+  };
+}
+
+export function comparePortfolios(prev, cur) {
+  if (!prev || !cur) return null;
+  const bySite = {};
+  for (const c of cur.sites) {
+    const p = prev.sites.find((x) => x.code === c.code);
+    bySite[c.code] = p ? compareSites(p, c) : { comparable: false, reason: 'site was not in the previous period' };
+  }
+  return {
+    percentByWeightThen: prev.pctByWeight,
+    percentByWeightNow: cur.pctByWeight,
+    percentChange: delta(cur.pctByWeight, prev.pctByWeight),
+    finishedThen: prev.totalDone,
+    finishedNow: cur.totalDone,
+    finishedChange: delta(cur.totalDone, prev.totalDone),
+    stuckThen: prev.totalStuck,
+    stuckNow: cur.totalStuck,
+    stuckChange: delta(cur.totalStuck, prev.totalStuck),
+    sitesAdded: cur.sites.filter((c) => !prev.sites.some((x) => x.code === c.code)).map((x) => x.code),
+    sitesRemoved: prev.sites.filter((x) => !cur.sites.some((c) => c.code === x.code)).map((x) => x.code),
+    bySite,
   };
 }
 

@@ -65,6 +65,10 @@ export function blank() {
       notes: '',              // what happened since, in the user's words
       carryPrevious: true,    // include the last stored report as context
     },
+    // A previous week's workbook or session, loaded for comparison. Its figures
+    // are recomputed by the same engine, so the week-on-week change is
+    // arithmetic rather than something the model is asked to guess.
+    previous: null,           // { kind, fileName, loadedAt, model, reports }
     settings: {
       provider: 'gemini',
       model: '',
@@ -82,6 +86,19 @@ export function subscribe(fn) { listeners.add(fn); return () => listeners.delete
 function emit() { for (const fn of listeners) fn(state); }
 export function getSaveState() { return saveState; }
 
+/*
+ * Save-state changes go to their own listeners, NOT the main subscribers.
+ *
+ * Previously autosave called emit() twice, and every emit rebuilt the whole work
+ * column. So half a second after ANY interaction — including a "silent" edit
+ * like typing in a field — the page was torn down and rebuilt, the document
+ * height collapsed, and the browser snapped the scroll position to the top.
+ * That was the cause of the constant jumping.
+ */
+const saveListeners = new Set();
+export function onSaveState(fn) { saveListeners.add(fn); return () => saveListeners.delete(fn); }
+function emitSave() { for (const fn of saveListeners) fn(saveState); }
+
 let timer = null;
 export function update(mutator, { silent = false } = {}) {
   mutator(state);
@@ -91,10 +108,10 @@ export function update(mutator, { silent = false } = {}) {
   clearTimeout(timer);
   timer = setTimeout(async () => {
     saveState = 'saving';
-    emit();
+    emitSave();
     const ok = await autosave();
     saveState = ok ? 'saved' : 'error';
-    emit();
+    emitSave();
   }, 500);
 }
 
@@ -110,6 +127,20 @@ export function reset() {
   saveState = 'idle';
   emit();
   autosave();
+}
+
+/**
+ * Clear the project data — workbook, reports, previous week, period notes —
+ * but keep provider settings and the API key, which belong to the user rather
+ * than the project.
+ */
+export async function clearSession() {
+  const keep = state.settings;
+  state = { ...blank(), settings: keep };
+  saveState = 'idle';
+  emit();
+  await wipe();
+  await autosave();
 }
 
 /** Clears generated reports but keeps the loaded workbook and selection. */

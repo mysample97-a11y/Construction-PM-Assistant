@@ -46,7 +46,10 @@ for (const k of ['localStorage', 'sessionStorage']) {
 }
 global.requestAnimationFrame = (fn) => setTimeout(fn, 0);
 global.queueMicrotask = queueMicrotask;
-window.scrollTo = () => {};
+let fakeScrollY = 0;
+const scrollCalls = [];
+Object.defineProperty(window, 'scrollY', { get: () => fakeScrollY, configurable: true });
+window.scrollTo = (x, y) => { scrollCalls.push(y); fakeScrollY = y; };
 window.XLSX = XLSX;
 window.open = () => null;                    // popup blocked, deliberately
 window.URL.createObjectURL = () => 'blob:x';
@@ -164,6 +167,11 @@ check('fixed rail rendered', !!$('.rail'));
 check('rail has its own scroll area', !!$('.rail__scroll'));
 check('work column rendered', !!$('.work'));
 check('session buttons live in the rail, not a top bar', !!$('.rail__foot'));
+const appCss = fs.readFileSync(path.join(root, 'assets/css/app.css'), 'utf8');
+check('#6: #app is a block, not a content-sized flex container', /#app\s*\{\s*display:\s*block/.test(appCss));
+check('#5: paragraphs use the full panel width in the work column', /\.work p[^{]*\{[^}]*max-width:\s*none/.test(appCss));
+check('app.css loads after base.css so its fixes win',
+  fs.readFileSync(path.join(root, 'index.html'), 'utf8').indexOf('app.css') > fs.readFileSync(path.join(root, 'index.html'), 'utf8').indexOf('base.css'));
 check('step 1 rendered', textOf('#app').includes('Load the workbook'));
 check('usage card rendered in the rail', textOf('.rail').includes('Requests this minute'));
 check('later steps hidden until a workbook is loaded', !textOf('#app').includes('Choose what to analyse'));
@@ -218,10 +226,23 @@ check('clear selection empties it', S.get().selection.length === 0 && !S.get().i
 check('generate button disabled with nothing selected',
   $$('button').find((b) => /Generate insight/.test(b.textContent))?.disabled === true);
 
+// #3: ticking a checkbox used to snap the page to the top.
+fakeScrollY = 1400;
+scrollCalls.length = 0;
 const firstBox = $$('.pick input')[0];
 firstBox.click();
 await wait(120);
 check('ticking one box selects one site', S.get().selection.length === 1, JSON.stringify(S.get().selection));
+check('ticking a checkbox restores the scroll position', fakeScrollY === 1400 && scrollCalls.includes(1400),
+  `scrollY=${fakeScrollY} calls=${JSON.stringify(scrollCalls)}`);
+check('ticking a checkbox never scrolls to the top', !scrollCalls.includes(0), JSON.stringify(scrollCalls));
+
+// #7: an autosave must not rebuild the page at all.
+const shellBefore = $('.work').firstElementChild;
+S.update((x) => { x.period = { ...x.period, notes: 'typing' }; }, { silent: true });
+await wait(800);   // past the 500ms autosave debounce
+check('a silent edit plus its autosave does not rebuild the page',
+  $('.work').firstElementChild === shellBefore, 'the work column was rebuilt');
 check('selection logs no errors', errors.length === 0, errors.join(' | '));
 
 /* --------------------- generation, with the network stubbed --------------------- */
@@ -321,6 +342,89 @@ check('provider-reported usage recorded', usageAfter.input === 1200 && usageAfte
   `${usageAfter.input}/${usageAfter.output}`);
 check('usage is not marked estimated when the provider reported it', usageAfter.estimated === false);
 check('usage card shows the tokens', textOf('.rail').includes('Tokens used'));
+
+/* ---------------------- collapsing ---------------------- */
+
+const repCard = $('.report');
+$('.report__head').click();
+await wait(40);
+check('a report can be collapsed', repCard.classList.contains('is-collapsed'));
+check('collapsing a report does not rebuild the page', $('.report') === repCard);
+S.update((x) => { x.selection = [...x.selection]; });
+await wait(120);
+check('a collapsed report stays collapsed across a re-render', $('.report').classList.contains('is-collapsed'));
+
+const stepBtn = $('.step .collapse-btn');
+stepBtn.click();
+await wait(40);
+check('a section can be collapsed', $('.step').classList.contains('is-collapsed'));
+
+$$('button').find((b) => b.textContent.trim() === 'Expand all').click();
+await wait(120);
+check('expand all opens every section', !$$('.step').some((x) => x.classList.contains('is-collapsed')));
+check('expand all opens every report', !$$('.report').some((x) => x.classList.contains('is-collapsed')));
+
+$$('button').find((b) => b.textContent.trim() === 'Collapse all').click();
+await wait(120);
+check('collapse all closes every report', $$('.report').every((x) => x.classList.contains('is-collapsed')));
+const { buildPrintHTML: bph } = await import('../js/core/exports.js');
+check('exports still include a collapsed report in full',
+  bph(analysePortfolio(S.get().model), S.get().reports, false).includes('Ductwork is the constraint'));
+$$('button').find((b) => b.textContent.trim() === 'Expand all').click();
+await wait(120);
+
+/* ---------------------- previous week ---------------------- */
+
+// Captured before this block, because it generates a new A-01 report that
+// replaces the one later tests assert against.
+const keptReports = JSON.parse(JSON.stringify(S.get().reports));
+
+check('previous-week loader shown in section 1', textOf('#app').includes('Previous week (optional)'));
+const prevModel = JSON.parse(JSON.stringify(S.get().model));
+// Roll A-01 back one week so there is a real difference to find.
+for (const t of prevModel.sites[0].detail.tasks) {
+  t.weekly = t.weekly.map((w, i) => (i === 3 && w === 'Finished' && t.weekly[2] !== 'Finished' ? 'WIP' : w));
+}
+S.update((x) => { x.previous = { kind: 'session', fileName: 'week3.json', loadedAt: new Date().toISOString(), model: prevModel, reports: {} }; });
+await wait(120);
+check('the previous week is acknowledged in section 1', textOf('#app').includes('week3.json'));
+
+let prevCaptured = null;
+window.fetch = async (url, opts) => {
+  prevCaptured = JSON.parse(opts.body);
+  return { ok: true, status: 200, headers: { get: () => null },
+    json: async () => ({ candidates: [{ content: { parts: [{ text: JSON.stringify({ introduction: 'compared', conclusions: { verdict: 'at_risk', statement: 'compared run' } }) }] } }] }),
+    text: async () => '' };
+};
+global.fetch = window.fetch;
+S.update((x) => { x.selection = ['A-01']; x.settings.reviewPayload = false; });
+await wait(120);
+$$('button').find((b) => /Generate insight/.test(b.textContent)).click();
+await wait(400);
+const prevSent = JSON.stringify(prevCaptured || {});
+check('the computed week-on-week change is sent to the model', prevSent.includes('computedChange') && prevSent.includes('finishedChange'));
+check('the comparison names its source file', prevSent.includes('week3.json'));
+check('the change is shown as figures in the report', textOf('#app').includes('CHANGE SINCE THE PREVIOUS WEEK'));
+
+/* ---------------------- clear session ---------------------- */
+
+check('clear session button is present', $$('button').some((b) => /Clear session/.test(b.textContent)));
+S.update((x) => { x.settings.provider = 'anthropic'; });
+await wait(60);
+await S.clearSession();
+await wait(150);
+check('clear session removes the workbook', !S.get().model);
+check('clear session removes the reports', Object.keys(S.get().reports).length === 0);
+check('clear session removes the previous week', !S.get().previous);
+check('clear session keeps provider settings', S.get().settings.provider === 'anthropic', S.get().settings.provider);
+check('clear session returns to step 1', textOf('#app').includes('Load the workbook') && !textOf('#app').includes('Choose what to analyse'));
+const restoredAfterClear = await S.restore();
+await wait(80);
+check('a cleared session does not come back on reload', !S.get().model);
+
+// put a workbook back for the tests that follow
+S.update((x) => { x.model = model; x.confirmed = true; x.settings.provider = 'gemini'; x.reports = keptReports; });
+await wait(150);
 
 /* -------------------------- error handling -------------------------- */
 

@@ -322,50 +322,80 @@ const sleep = (ms, signal) => new Promise((res, rej) => {
 });
 
 /**
- * One HTTP attempt with retry.
+ * One request, with retry.
  *
- * 529/503 are server-side overload and worth retrying with backoff.
- * 429 is a real rate limit: retrying makes it worse and burns request quota,
- * so it fails fast with an explanation instead.
+ * WHY 503s HAPPEN: a 503 (or Anthropic's 529) means the provider's servers for
+ * that model are overloaded. It is not your quota and not your token count —
+ * the request never got far enough to be counted against either. The newest
+ * models are the most crowded, and free-tier traffic is the first to be turned
+ * away when they are busy.
+ *
+ * The old version retried three times over about 3.6 seconds, which is far too
+ * short: overload clears in tens of seconds, not three. This waits roughly 5s,
+ * 12s, 25s, 45s, with random jitter so many clients don't all retry in lockstep,
+ * and honours Retry-After when the server sends one. Every retry is a real
+ * request against your per-minute limit, which is why this caps at five.
+ *
+ * 429 is different: it is YOUR rate limit, and retrying immediately just burns
+ * more of it. That fails fast with an explanation.
  */
-async function callWithRetry(provider, doFetch, { signal, maxAttempts = 3 } = {}) {
-  let lastErr = null;
+let OVERLOAD_WAITS = [5000, 12000, 25000, 45000];
+
+/** Test hook only: the real waits total over a minute, far too slow for a suite. */
+export function _setOverloadWaits(arr) { OVERLOAD_WAITS = arr; }
+
+async function callWithRetry(provider, doFetch, { signal, onStatus } = {}) {
+  const maxAttempts = OVERLOAD_WAITS.length + 1;
+  let lastStatus = null;
+
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     if (signal?.aborted) throw new CancelledError();
-    recordRequest(provider, attempt === 0 ? 'first attempt' : `retry after ${lastErr?.status || 'error'}`);
+    recordRequest(provider, attempt === 0 ? 'first attempt' : `retry after ${lastStatus || 'error'}`);
+
     let response;
     try {
       response = await doFetch();
     } catch (e) {
       if (signal?.aborted) throw new CancelledError();
       if (e?.name === 'AbortError') throw new Error('The request timed out. Try fewer sites at once.');
-      lastErr = e;
+      lastStatus = 'network error';
       if (attempt === maxAttempts - 1) throw new Error(`Could not reach ${provider}. Check your connection. (${e.message})`);
-      await sleep(800 * (attempt + 1), signal);
+      await waitWithStatus(OVERLOAD_WAITS[attempt], attempt, maxAttempts, 'connection failed', onStatus, signal);
       continue;
     }
 
-    if (response.ok) return response;
+    if (response.ok) { onStatus?.(null); return response; }
 
     const body = await response.text().catch(() => '');
     if (response.status === 429) {
       const wait = retryAfterSeconds(response, body);
-      throw new Error(
-        `Rate limit reached (429).${wait ? ` The provider asked to wait about ${wait}s.` : ''} ` +
-        'Retrying immediately would only burn more of your request quota. Wait, then run fewer sites at a time.');
+      const e = new Error(
+        `Rate limit reached (429) — this is your account's limit, not the server being busy.${wait ? ` The provider asked to wait about ${wait}s.` : ''} ` +
+        'Retrying straight away would only burn more of your request quota. Wait, then run fewer sites at a time.');
+      e.status = 429;
+      throw e;
     }
     if (response.status === 401 || response.status === 403) {
       throw new Error(`${provider} rejected the API key (${response.status}). Check it is correct, active, and allowed for this model.`);
     }
     if (response.status === 404) {
-      throw new Error(`${provider} does not recognise that model name (404). Model names change — check the current list in Settings.`);
+      const e = new Error(`${provider} does not recognise the model name (404). Model names change — check the current list in Settings.`);
+      e.status = 404;
+      throw e;
     }
-    if (response.status === 529 || response.status === 503 || response.status === 500) {
-      lastErr = { status: response.status };
+    if ([500, 502, 503, 504, 529].includes(response.status)) {
+      lastStatus = response.status;
       if (attempt === maxAttempts - 1) {
-        throw new Error(`${provider} is overloaded (${response.status}) and did not recover after ${maxAttempts} attempts. Try again shortly.`);
+        const e = new Error(
+          `${provider} is still overloaded (${response.status}) after ${maxAttempts} attempts over about ${Math.round(OVERLOAD_WAITS.reduce((a, b) => a + b, 0) / 1000)}s. ` +
+          'This is the provider\'s servers being busy for this model, not your quota or tokens. Try again in a few minutes, or switch to a more established model in Settings.');
+        e.status = response.status;
+        e.overloaded = true;
+        throw e;
       }
-      await sleep(1200 * Math.pow(2, attempt), signal);
+      const hinted = retryAfterSeconds(response, body);
+      const base = hinted ? hinted * 1000 : OVERLOAD_WAITS[attempt];
+      await waitWithStatus(base, attempt, maxAttempts, `server busy (${response.status})`, onStatus, signal);
       continue;
     }
     let msg = body.slice(0, 300);
@@ -375,7 +405,23 @@ async function callWithRetry(provider, doFetch, { signal, maxAttempts = 3 } = {}
   throw new Error('Request failed.');
 }
 
-async function callGemini({ model, prompt, signal, maxTokens }) {
+/** Waits with jitter, reporting a live countdown so the user can see it is working. */
+async function waitWithStatus(baseMs, attempt, maxAttempts, why, onStatus, signal) {
+  const ms = Math.round(baseMs * (0.8 + Math.random() * 0.4));
+  const until = Date.now() + ms;
+  while (Date.now() < until) {
+    if (signal?.aborted) { onStatus?.(null); throw new CancelledError(); }
+    onStatus?.({
+      why,
+      attempt: attempt + 2,
+      maxAttempts,
+      secondsLeft: Math.ceil((until - Date.now()) / 1000),
+    });
+    await sleep(Math.min(1000, until - Date.now()), signal);
+  }
+}
+
+async function callGemini({ model, prompt, signal, maxTokens, onStatus }) {
   const key = getApiKey();
   const { signal: s, done } = makeSignal(signal, 120000);
   try {
@@ -389,7 +435,7 @@ async function callGemini({ model, prompt, signal, maxTokens }) {
           contents: [{ role: 'user', parts: [{ text: prompt }] }],
           generationConfig: { temperature: 0.3, responseMimeType: 'application/json', maxOutputTokens: maxTokens },
         }),
-      }), { signal });
+      }), { signal, onStatus });
     const data = await res.json();
     const text = data?.candidates?.[0]?.content?.parts?.map((p) => p.text).filter(Boolean).join('') || '';
     if (!text && data?.promptFeedback?.blockReason) {
@@ -399,7 +445,7 @@ async function callGemini({ model, prompt, signal, maxTokens }) {
   } finally { done(); }
 }
 
-async function callAnthropic({ model, prompt, signal, maxTokens }) {
+async function callAnthropic({ model, prompt, signal, maxTokens, onStatus }) {
   const key = getApiKey();
   const { signal: s, done } = makeSignal(signal, 120000);
   try {
@@ -415,7 +461,7 @@ async function callAnthropic({ model, prompt, signal, maxTokens }) {
         model, max_tokens: maxTokens, temperature: 0.3, system: SYSTEM,
         messages: [{ role: 'user', content: prompt }],
       }),
-    }), { signal });
+    }), { signal, onStatus });
     const headers = readRateLimitHeaders(res);
     const data = await res.json();
     const text = (data?.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
@@ -423,7 +469,7 @@ async function callAnthropic({ model, prompt, signal, maxTokens }) {
   } finally { done(); }
 }
 
-async function callOpenAI({ model, prompt, signal, maxTokens }) {
+async function callOpenAI({ model, prompt, signal, maxTokens, onStatus }) {
   const key = getApiKey();
   const { signal: s, done } = makeSignal(signal, 120000);
   try {
@@ -435,7 +481,7 @@ async function callOpenAI({ model, prompt, signal, maxTokens }) {
         response_format: { type: 'json_object' },
         messages: [{ role: 'system', content: SYSTEM }, { role: 'user', content: prompt }],
       }),
-    }), { signal });
+    }), { signal, onStatus });
     const data = await res.json();
     return { text: data?.choices?.[0]?.message?.content || '', usage: data?.usage || null, headers: null };
   } finally { done(); }
@@ -462,7 +508,7 @@ export function parseModelJson(text) {
  * Run one analysis. Returns a report object ready to store.
  * @param {'site'|'master'} kind
  */
-export async function run({ kind, payload, settings, followUp, signal }) {
+export async function run({ kind, payload, settings, followUp, signal, onStatus }) {
   if (!getApiKey()) throw new Error('No API key set. Add one in Settings — it stays in this browser and is never written to a session file.');
   const provider = PROVIDERS[settings.provider];
   if (!provider) throw new Error(`Unknown provider "${settings.provider}".`);
@@ -471,7 +517,23 @@ export async function run({ kind, payload, settings, followUp, signal }) {
 
   const prompt = buildPrompt(kind, payload, followUp);
   const started = Date.now();
-  const { text, usage, headers } = await ADAPTERS[settings.provider]({ model, prompt, signal, maxTokens });
+
+  let usedModel = model;
+  let fellBack = false;
+  let out;
+  try {
+    out = await ADAPTERS[settings.provider]({ model, prompt, signal, maxTokens, onStatus });
+  } catch (e) {
+    // Only an overload is worth a second model. A bad key, a 429 or a 404 would
+    // fail identically on any model, so those propagate unchanged.
+    const fallback = (settings.fallbackModel || '').trim();
+    if (!e?.overloaded || !fallback || fallback === model || signal?.aborted) throw e;
+    onStatus?.({ why: `${model} overloaded — switching to ${fallback}`, attempt: 1, maxAttempts: 1, secondsLeft: 0 });
+    out = await ADAPTERS[settings.provider]({ model: fallback, prompt, signal, maxTokens, onStatus });
+    usedModel = fallback;
+    fellBack = true;
+  }
+  const { text, usage, headers } = out;
   const result = parseModelJson(text);
 
   const reported = readProviderUsage(usage);
@@ -490,7 +552,9 @@ export async function run({ kind, payload, settings, followUp, signal }) {
     followUp: followUp || null,
     provider: settings.provider,
     providerLabel: provider.label,
-    model,
+    model: usedModel,
+    requestedModel: model,
+    fellBack,
     at: new Date().toISOString(),
     ms: Date.now() - started,
     tokens: { ...tokens, estimated: !reported },

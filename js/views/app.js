@@ -3,7 +3,7 @@ import {
   fmtNum, clamp, debounce,
 } from '../core/util.js';
 import { readWorkbook, parseWorkbook, screenText, xlsxAvailable, STATUS } from '../core/parser.js';
-import { analysePortfolio } from '../core/engine.js';
+import { analysePortfolio, comparePortfolios, compareSites } from '../core/engine.js';
 import * as S from '../core/session.js';
 import * as T from '../core/tokens.js';
 import { PROVIDERS, run as runAI, buildSitePayload, buildMasterPayload, previewPayload, CancelledError } from '../core/ai.js';
@@ -24,6 +24,26 @@ let currentKey = null;
 
 let cachedPortfolio = null;
 let cachedStamp = '';
+let cachedPrev = null;
+let cachedPrevStamp = '';
+
+/* Which sections and reports the user has collapsed. Kept in memory rather than
+   the session: it is a view preference, and re-expanding everything on reload
+   is the safer default. Exports ignore it entirely — they are built from data,
+   never from what happens to be visible. */
+const collapsed = new Set();
+let retryStatus = null;    // live countdown while a provider is overloaded
+
+/** The previous week's analysis, recomputed by the same engine. */
+function previousPortfolio() {
+  const prev = S.get().previous;
+  if (!prev?.model) return null;
+  const stamp = `${prev.loadedAt}|${prev.model.sites?.length}`;
+  if (cachedPrev && cachedPrevStamp === stamp) return cachedPrev;
+  try { cachedPrev = analysePortfolio(prev.model); } catch { cachedPrev = null; }
+  cachedPrevStamp = stamp;
+  return cachedPrev;
+}
 
 function portfolio() {
   const st = S.get();
@@ -72,9 +92,21 @@ export function boot() {
   });
 }
 
+/*
+ * The work column is rebuilt on each state change. Rebuilding empties it first,
+ * which collapses the page height and makes the browser clamp the scroll
+ * position to the top — the jump you saw after ticking a checkbox. The scroll
+ * position is captured before the rebuild and restored after it, and the
+ * column's height is held while it is empty so nothing collapses in between.
+ */
 function render() {
   const st = S.get();
+  const y = window.scrollY;
+  const h = host.offsetHeight;
+  if (h) host.style.minHeight = `${h}px`;
+
   mount(host,
+    workbar(st),
     stepImport(st),
     st.model ? stepConfirm(st) : null,
     st.model && st.confirmed ? stepPeriod(st) : null,
@@ -82,6 +114,50 @@ function render() {
     st.model && st.confirmed ? stepReports(st) : null,
   );
   renderRail();
+
+  host.style.minHeight = '';
+  if (y) window.scrollTo(0, y);
+}
+
+function workbar(st) {
+  return el('div', { class: 'workbar' }, [
+    el('div', { class: 'grow' }, [
+      el('div', { class: 'workbar__title', text: st.file ? st.file.name.replace(/\.[^.]+$/, '') : 'New analysis' }),
+      el('div', {
+        class: 'workbar__sub',
+        text: st.model
+          ? `${st.model.sites.length} sites · ${Object.keys(st.reports).length} report${Object.keys(st.reports).length === 1 ? '' : 's'}${st.previous ? ` · compared with ${st.previous.fileName}` : ''}`
+          : 'Load a workbook to begin',
+      }),
+    ]),
+    el('button', { class: 'btn btn--sm', onclick: () => toggleAll(true) }, ['Collapse all']),
+    el('button', { class: 'btn btn--sm', onclick: () => toggleAll(false) }, ['Expand all']),
+    el('button', { class: 'btn btn--sm btn--clear', onclick: onClearSession }, [icon('trash', 13), 'Clear session']),
+  ]);
+}
+
+function toggleAll(collapse) {
+  const st = S.get();
+  const keys = ['step:1', 'step:2', 'step:3', 'step:4', 'step:5',
+    ...Object.keys(st.reports).map((k) => `report:${k}`)];
+  for (const k of keys) { if (collapse) collapsed.add(k); else collapsed.delete(k); }
+  render();
+}
+
+async function onClearSession() {
+  const st = S.get();
+  const n = Object.keys(st.reports || {}).length;
+  const ok = await confirmDialog({
+    title: 'Clear this session?',
+    message: `This removes the loaded workbook${n ? `, ${n} generated report${n === 1 ? '' : 's'}` : ''}${st.previous ? ', the previous week you loaded' : ''} and your period notes from this browser. Your provider settings and API key are kept. If you want any of this later, press Save in the left panel first.`,
+    confirmLabel: 'Clear session', tone: 'danger',
+  });
+  if (!ok) return;
+  cachedPortfolio = null; cachedPrev = null;
+  collapsed.clear();
+  await S.clearSession();
+  window.scrollTo(0, 0);
+  toast('Session cleared. Load a workbook to start a new analysis.', 'sign');
 }
 
 /* ========================================================================
@@ -89,11 +165,12 @@ function render() {
    ======================================================================== */
 
 function stepImport(st) {
-  const drop = el('div', { class: 'dropzone' }, [
+  /* ---- this week's workbook ---- */
+  const drop = el('div', { class: `dropzone${st.file ? ' is-loaded' : ''}` }, [
     el('div', { style: { marginBottom: '6px' } }, [icon('upload', 22)]),
-    el('h3', { text: st.file ? `Loaded: ${st.file.name}` : 'Drop your tracker workbook here, or click to choose' }),
+    el('h3', { text: st.file ? `This week: ${st.file.name}` : 'This week\u2019s workbook' }),
     el('p', { class: 'small muted', style: { marginTop: '4px' } }, [
-      'Sheet 1 the site register, sheet 2 the task template, then one sheet per site.',
+      st.file ? 'Click or drop to replace it.' : 'Drop the tracker here, or click to choose. Register, template, then one sheet per site.',
     ]),
   ]);
 
@@ -118,13 +195,81 @@ function stepImport(st) {
       toast(e.message || 'That file could not be read.', 'survey', 8000);
     }
   };
+  wireDrop(drop, load, '.xlsx,.xlsm,.xls');
 
-  drop.addEventListener('click', async () => load(await pickFile('.xlsx,.xlsm,.xls')));
-  drop.addEventListener('dragover', (e) => { e.preventDefault(); drop.classList.add('is-over'); });
-  drop.addEventListener('dragleave', () => drop.classList.remove('is-over'));
-  drop.addEventListener('drop', (e) => { e.preventDefault(); drop.classList.remove('is-over'); load(e.dataTransfer?.files?.[0]); });
+  /* ---- previous week, for comparison ---- */
+  const prev = st.previous;
+  const prevDrop = el('div', { class: `dropzone dropzone--small${prev ? ' is-loaded-prev' : ''}` }, [
+    el('div', { style: { marginBottom: '4px' } }, [icon('upload', 18)]),
+    el('h3', { text: prev ? `Previous: ${prev.fileName}` : 'Previous week (optional)' }),
+    el('p', { class: 'small muted', style: { marginTop: '4px' } }, [
+      prev
+        ? `${prev.kind === 'session' ? `Session with ${Object.keys(prev.reports || {}).length} report${Object.keys(prev.reports || {}).length === 1 ? '' : 's'}` : 'Workbook'} \u00b7 loaded ${fmtDate((prev.loadedAt || '').slice(0, 10))}`
+        : 'Last week\u2019s workbook (.xlsx) or saved session (.json). Used to show what changed.',
+    ]),
+  ]);
 
-  return section('1', 'Load the workbook', el('div', { class: 'sheet__body' }, [drop]));
+  const loadPrev = async (file) => {
+    if (!file) return;
+    try {
+      const entry = await readPrevious(file);
+      cachedPrev = null;
+      S.update((s) => { s.previous = entry; });
+      const cur = portfolio();
+      const pp = previousPortfolio();
+      const shared = cur && pp ? cur.sites.filter((x) => pp.sites.some((y) => y.code === x.code)).length : 0;
+      toast(`Previous week loaded from ${file.name}${cur ? ` \u2014 ${shared} site${shared === 1 ? '' : 's'} can be compared` : ''}.`, 'sign', 6000);
+    } catch (e) {
+      toast(e.message || 'That file could not be read.', 'survey', 8000);
+    }
+  };
+  wireDrop(prevDrop, loadPrev, '.xlsx,.xlsm,.xls,.json,application/json');
+
+  const prevHelp = el('div', { class: 'notice', style: { alignSelf: 'stretch' } }, [
+    el('h4', { text: 'Why load the previous week' }),
+    el('p', { class: 'small', text: 'Both weeks go through the same engine, so the change \u2014 tasks finished, blockers cleared, forecast movement \u2014 is calculated rather than guessed. A saved session also brings last week\u2019s reports, so the review can say whether its actions were acted on.' }),
+    prev ? el('button', {
+      class: 'btn btn--sm', style: { marginTop: '6px' },
+      onclick: () => { cachedPrev = null; S.update((s) => { s.previous = null; }); toast('Previous week removed.'); },
+    }, [icon('trash', 13), 'Remove previous week']) : null,
+  ]);
+
+  return section('1', 'Load the workbook', el('div', { class: 'sheet__body stack' }, [
+    drop,
+    el('div', { class: 'prevload' }, [prevDrop, prevHelp]),
+  ]), st.file ? `${st.file.name}${prev ? ' + previous week' : ''}` : '');
+}
+
+function wireDrop(zone, onFile, accept) {
+  zone.addEventListener('click', async () => onFile(await pickFile(accept)));
+  zone.addEventListener('dragover', (e) => { e.preventDefault(); zone.classList.add('is-over'); });
+  zone.addEventListener('dragleave', () => zone.classList.remove('is-over'));
+  zone.addEventListener('drop', (e) => { e.preventDefault(); zone.classList.remove('is-over'); onFile(e.dataTransfer?.files?.[0]); });
+}
+
+/**
+ * Read a previous week from either format.
+ *  - A saved session (.json): brings the parsed workbook AND its reports.
+ *  - A workbook (.xlsx): brings the figures only, parsed like this week's.
+ * Either way the comparison is computed by the same engine, never inferred.
+ */
+async function readPrevious(file) {
+  const name = file.name || 'previous';
+  if (/\.json$/i.test(name)) {
+    let parsed;
+    try { parsed = JSON.parse(await file.text()); }
+    catch { throw new Error('That .json is not a session file. Use a file saved with the Save button, or last week\u2019s .xlsx.'); }
+    if (parsed?.format !== S.SESSION_FORMAT || !parsed.state) {
+      throw new Error('That .json is not a session saved by this app.');
+    }
+    const st = S.stripSecrets(parsed.state);
+    if (!st.model) throw new Error('That session has no workbook in it, so there is nothing to compare against.');
+    return { kind: 'session', fileName: name, loadedAt: new Date().toISOString(), model: st.model, reports: st.reports || {} };
+  }
+  if (!xlsxAvailable()) throw new Error('The spreadsheet reader did not load.');
+  const model = parseWorkbook(await readWorkbook(file));
+  if (!model.sites.length) throw new Error('No sites found in that workbook.');
+  return { kind: 'workbook', fileName: name, loadedAt: new Date().toISOString(), model, reports: {} };
 }
 
 /* ========================================================================
@@ -379,6 +524,11 @@ function stepRun(st) {
     running ? `Cancel (${queue.length} left)` : `Generate insight${selectedKeys.length > 1 ? `s (${selectedKeys.length})` : ''}`);
   runBtn.addEventListener('click', () => (running ? cancelRun() : startRun()));
 
+  body.appendChild(el('div', {
+    id: 'retrybar', class: `retrybar${retryStatus ? '' : ' hidden'}`,
+    text: retryStatus ? `Provider busy — retrying in ${retryStatus.secondsLeft}s` : '',
+  }));
+
   body.appendChild(el('div', { class: 'row row--wrap' }, [
     runBtn,
     el('button', {
@@ -399,8 +549,29 @@ function stepRun(st) {
 function withPeriod(payload, key) {
   const st = S.get();
   const per = st.period || {};
-  const prevReport = per.carryPrevious !== false ? st.reports?.[key] : null;
-  const anything = per.label || per.previousDate || per.previousWeek || per.notes || prevReport;
+
+  // Last week's review of this same scope: from this session if one was run,
+  // otherwise from a previous-week session file if one was loaded.
+  const ownPrev = per.carryPrevious !== false ? st.reports?.[key] : null;
+  const prevReport = ownPrev || st.previous?.reports?.[key] || null;
+
+  // Computed change against the previous week, where one is loaded.
+  let computedChange = null;
+  const pp = previousPortfolio();
+  const cur = portfolio();
+  if (pp && cur) {
+    if (key === MASTER) {
+      computedChange = comparePortfolios(pp, cur);
+    } else {
+      const a = cur.sites.find((x) => x.code === key);
+      const b = pp.sites.find((x) => x.code === key);
+      computedChange = a && b
+        ? compareSites(b, a)
+        : { comparable: false, reason: 'site was not in the previous week\u2019s workbook' };
+    }
+  }
+
+  const anything = per.label || per.previousDate || per.previousWeek || per.notes || prevReport || computedChange;
   if (!anything) return payload;
 
   return {
@@ -409,7 +580,9 @@ function withPeriod(payload, key) {
       reviewLabel: per.label || undefined,
       previousAnalysisDate: per.previousDate || (prevReport ? String(prevReport.at).slice(0, 10) : undefined),
       previousWeekCovered: per.previousWeek || undefined,
+      previousSource: st.previous?.fileName || undefined,
       whatHappenedSince: per.notes || undefined,
+      computedChange: computedChange || undefined,
       lastReview: prevReport ? {
         verdict: prevReport.result?.conclusions?.verdict || undefined,
         statement: prevReport.result?.conclusions?.statement || prevReport.result?.introduction || undefined,
@@ -481,8 +654,13 @@ async function startRun() {
       const report = await runAI({
         kind: key === MASTER ? 'master' : 'site',
         payload, settings: S.get().settings, signal: controller.signal,
+        onStatus: showRetry,
       });
+      showRetry(null);
       report.periodContext = payload.previousPeriod || null;
+      if (report.fellBack) {
+        toast(`${report.requestedModel} was overloaded, so ${key === MASTER ? 'the master' : key} was generated with ${report.model} instead.`, 'hivis', 9000);
+      }
       // Persist after EVERY call, so a crash or a cancel keeps what is done.
       S.update((s) => {
         s.reports = { ...s.reports, [key]: report };
@@ -504,6 +682,7 @@ async function startRun() {
   running = false;
   currentKey = null;
   controller = null;
+  showRetry(null);
   const left = queue.length;
   queue = [];
   render();
@@ -521,8 +700,24 @@ function cancelRun() {
   queue = [];
 }
 
+/**
+ * Updates the retry banner in place. Deliberately NOT a full render: a countdown
+ * ticks every second, and rebuilding the page that often is exactly what made
+ * it jump around before.
+ */
+function showRetry(status) {
+  retryStatus = status;
+  const node = document.getElementById('retrybar');
+  if (!node) return;
+  if (!status) { node.classList.add('hidden'); node.textContent = ''; return; }
+  node.classList.remove('hidden');
+  node.textContent = status.secondsLeft
+    ? `Provider busy — ${status.why}. Retrying in ${status.secondsLeft}s (attempt ${status.attempt} of ${status.maxAttempts}). You can cancel.`
+    : `${status.why}…`;
+}
+
 /* ========================================================================
-   Step 4 — reports
+   Step 5 — reports
    ======================================================================== */
 
 function stepReports(st) {
@@ -565,10 +760,15 @@ function stepReports(st) {
 function reportCard(rep, p) {
   const r = rep.result || {};
   const a = rep.kind === 'master' ? null : p.sites.find((s) => s.code === rep.key);
-  const wrap = el('div', { class: 'sheet report' });
-  const open = { v: true };
+  const ckey = `report:${rep.key}`;
+  const wrap = el('div', { class: `sheet report${collapsed.has(ckey) ? ' is-collapsed' : ''}` });
+  const toggle = () => {
+    if (collapsed.has(ckey)) collapsed.delete(ckey); else collapsed.add(ckey);
+    wrap.classList.toggle('is-collapsed', collapsed.has(ckey));
+  };
 
   const head = el('button', { class: 'report__head' }, [
+    el('span', { class: 'collapse-btn', 'aria-hidden': 'true' }, ['▼']),
     el('span', { class: 'grow row', style: { gap: '8px' } }, [
       icon('insights', 15),
       el('strong', { text: rep.title }),
@@ -578,11 +778,11 @@ function reportCard(rep, p) {
         text: String(r.conclusions.verdict).replace(/_/g, ' '),
       }) : null,
     ]),
-    el('span', { class: 'xs num', text: `${rep.providerLabel} · ${T.formatTokens(rep.tokens.input + rep.tokens.output)} tok${rep.tokens.estimated ? ' est' : ''}` }),
+    el('span', { class: 'xs num', text: `${rep.providerLabel} · ${T.formatTokens(rep.tokens.input + rep.tokens.output)} tok${rep.tokens.estimated ? ' est' : ''}${rep.fellBack ? ` · fallback ${rep.model}` : ''}` }),
   ]);
 
   const bodyEl = el('div', { class: 'report__body' });
-  head.addEventListener('click', () => { open.v = !open.v; bodyEl.classList.toggle('hidden', !open.v); });
+  head.addEventListener('click', toggle);
 
   const prose = (text) => (text ? el('div', { class: 'aiprose' }, [el('p', { text })]) : null);
   const list = (title, arr, fmt) => {
@@ -645,8 +845,9 @@ function reportCard(rep, p) {
       },
     ]),
     rep.periodContext?.previousAnalysisDate || rep.periodContext?.reviewLabel
-      ? el('p', { class: 'small muted', text: `Previous analysis: ${rep.periodContext.previousAnalysisDate ? fmtDate(rep.periodContext.previousAnalysisDate) : 'not recorded'}${rep.periodContext.previousWeekCovered ? `, covering ${rep.periodContext.previousWeekCovered}` : ''}.` })
+      ? el('p', { class: 'small muted', text: `Previous analysis: ${rep.periodContext.previousAnalysisDate ? fmtDate(rep.periodContext.previousAnalysisDate) : 'not recorded'}${rep.periodContext.previousWeekCovered ? `, covering ${rep.periodContext.previousWeekCovered}` : ''}${rep.periodContext.previousSource ? ` (from ${rep.periodContext.previousSource})` : ''}.` })
       : el('p', { class: 'small muted', text: 'No previous analysis recorded for comparison.' }),
+    changeFigs(rep.periodContext?.computedChange, figs),
     prose(r.timelineNote)));
 
   /* ---- 3. Task status ---- */
@@ -771,6 +972,34 @@ function reportCard(rep, p) {
   return wrap;
 }
 
+/**
+ * Week-on-week change, as figures. Computed by the engine from both workbooks,
+ * so it is shown as fact, separate from anything the model says about it.
+ */
+function changeFigs(c, figs) {
+  if (!c) return null;
+  if (c.comparable === false) {
+    return el('p', { class: 'small muted', text: `No week-on-week comparison: ${c.reason}.` });
+  }
+  const sign = (n, unit = '') => (n == null ? '—' : `${n > 0 ? '+' : ''}${n}${unit}`);
+  const tone = (n, goodWhenUp) => (n == null || n === 0 ? undefined : ((n > 0) === goodWhenUp ? 'sign' : 'survey'));
+  return el('div', {}, [
+    el('div', { class: 'xs', style: { color: 'var(--ink-3)', margin: '4px 0 6px', fontWeight: 600 }, text: 'CHANGE SINCE THE PREVIOUS WEEK (computed)' }),
+    figs([
+      { k: 'Complete', v: sign(c.percentChange, ' pts'), n: `${c.percentByWeightThen ?? '—'}% → ${c.percentByWeightNow ?? '—'}%`, tone: tone(c.percentChange, true) },
+      { k: 'Tasks finished', v: sign(c.finishedChange), n: `${c.finishedThen ?? '—'} → ${c.finishedNow ?? '—'}`, tone: tone(c.finishedChange, true) },
+      { k: 'Stuck', v: sign(c.stuckChange), n: `${c.stuckThen ?? '—'} → ${c.stuckNow ?? '—'}`, tone: tone(c.stuckChange, false) },
+      c.slipChange !== undefined ? { k: 'Slip vs target', v: sign(c.slipChange, 'w'), n: `${c.slipThen ?? '—'} → ${c.slipNow ?? '—'}`, tone: tone(c.slipChange, false) } : null,
+      c.tasksAddedSince !== undefined ? { k: 'Tasks added since', v: String(c.tasksAddedSince) } : null,
+    ]),
+    c.cleared?.length || c.newlyStuck?.length ? el('p', { class: 'small', text: [
+      c.cleared?.length ? `Cleared since last week: ${c.cleared.join(', ')}.` : '',
+      c.newlyStuck?.length ? `Newly stuck: ${c.newlyStuck.join(', ')}.` : '',
+      c.stillStuck?.length ? `Still stuck: ${c.stillStuck.join(', ')}.` : '',
+    ].filter(Boolean).join(' ') }) : null,
+  ]);
+}
+
 /** Charts for a report. Site reports get the full set; the master gets the comparison. */
 function drawReportCharts(host, a, p) {
   const add = (fn, ...args) => {
@@ -825,14 +1054,15 @@ function continueReport(rep, p) {
           );
           const next = await runAI({
             kind: rep.kind, payload, settings: S.get().settings,
-            followUp: q, signal: controller.signal,
+            followUp: q, signal: controller.signal, onStatus: showRetry,
           });
+          next.periodContext = payload.previousPeriod || null;
           S.update((s) => { s.reports = { ...s.reports, [rep.key]: next }; });
           toast('Updated.', 'sign');
         } catch (e) {
           toast(e instanceof CancelledError ? 'Cancelled.' : e.message, e instanceof CancelledError ? 'hivis' : 'survey');
         } finally {
-          running = false; currentKey = null; controller = null; render();
+          running = false; currentKey = null; controller = null; showRetry(null); render();
         }
       },
     }, ['Ask']),
@@ -993,6 +1223,10 @@ function openSettings() {
   const remember = el('input', { type: 'checkbox', checked: st.settings.rememberKeyForSession ? true : null });
   const review = el('input', { type: 'checkbox', checked: st.settings.reviewPayload ? true : null });
   const maxTok = el('input', { class: 'input', type: 'number', value: st.settings.maxTokens, min: 1024, max: 16000 });
+  const fallback = el('input', {
+    class: 'input', value: st.settings.fallbackModel ?? '',
+    placeholder: `e.g. ${PROVIDERS[st.settings.provider].defaultModel}`,
+  });
 
   const lim = T.getLimits(st.settings.provider);
   const tier = el('select', { class: 'select' }, [
@@ -1022,6 +1256,10 @@ function openSettings() {
       el('div', { class: 'field span-2' }, [
         el('label', { text: 'API key' }), key,
         el('span', { class: 'hint' }, ['Get one from ', el('a', { href: PROVIDERS[st.settings.provider].keyUrl, target: '_blank', rel: 'noopener noreferrer', text: 'the provider console' }), '. The field clears after saving.']),
+      ]),
+      el('div', { class: 'field' }, [
+        el('label', { text: 'Fallback model if overloaded' }), fallback,
+        el('span', { class: 'hint', text: 'Used only when your model is still returning 503 after all retries. Pick an established model — the newest ones are the most crowded. Leave blank to never switch.' }),
       ]),
       el('div', { class: 'field' }, [
         el('label', { text: 'Max output tokens per call' }), maxTok,
@@ -1065,6 +1303,7 @@ function openSettings() {
             rememberKeyForSession: remember.checked,
             reviewPayload: review.checked,
             maxTokens: clamp(Number(maxTok.value) || 4096, 512, 16000),
+            fallbackModel: fallback.value.trim(),
           };
         });
         if (key.value.trim()) S.setApiKey(key.value.trim(), remember.checked);
@@ -1107,15 +1346,27 @@ async function onLoadSession() {
 /* ------------------------------- helpers ------------------------------- */
 
 function section(n, title, bodyEl, meta) {
-  return el('div', { class: 'sheet step' }, [
+  const key = `step:${n}`;
+  const wrap = el('div', { class: `sheet step${collapsed.has(key) ? ' is-collapsed' : ''}` });
+  const btn = el('button', {
+    class: 'collapse-btn', title: 'Collapse or expand', 'aria-label': `Collapse or expand ${title}`,
+    onclick: (e) => {
+      e.stopPropagation();
+      if (collapsed.has(key)) collapsed.delete(key); else collapsed.add(key);
+      wrap.classList.toggle('is-collapsed', collapsed.has(key));
+    },
+  }, ['▼']);
+  mount(wrap,
     el('div', { class: 'sheet__head' }, [
+      btn,
       el('span', { class: 'step__n', text: n }),
       el('h3', { text: title }),
       el('span', { class: 'grow' }),
       meta ? el('span', { class: 'xs dim', text: meta }) : null,
     ]),
     bodyEl,
-  ]);
+  );
+  return wrap;
 }
 
 function band(k, v, note, tone) {
