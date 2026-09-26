@@ -154,6 +154,15 @@ const PREREQ_COLS = {
   notes:     ['notes', 'remarks', 'comment'],
 };
 
+const SCOPE_COLS = {
+  ref:     ['ref', 'id', 'no', 'sno', 'item no'],
+  item:    ['scopeitemtask', 'scopeitem', 'item', 'scope', 'description', 'task'],
+  type:    ['type', 'category', 'kind'],
+  raised:  ['dateraisedadded', 'dateraised', 'raised', 'dateadded', 'added', 'date'],
+  status:  ['status', 'state'],
+  comment: ['comment', 'comments', 'notes', 'remarks'],
+};
+
 const LOG_COLS = {
   id:       ['logid', 'id', 'ref'],
   week:     ['weekwno', 'week', 'wno', 'weekno', 'weeknumber'],
@@ -417,6 +426,36 @@ function parseSiteSheet(sheet) {
     }
   }
 
+  /* Optional Scope table.
+     Some sites keep an explicit scope list; most do not. Where it exists the
+     report's scope section uses it, and where it does not the section falls
+     back to the task Type / Date added columns. Detected by its own header
+     rather than by position, because teams insert it wherever it suits them. */
+  const scope = [];
+  const sHr = findHeaderRow(rows, ['scope item / task']) >= 0
+    ? findHeaderRow(rows, ['scope item / task'])
+    : (findHeaderRow(rows, ['scopeitem']) >= 0 ? findHeaderRow(rows, ['scopeitem']) : -1);
+  if (sHr >= 0) {
+    const sc = mapColumns(rows[sHr], SCOPE_COLS);
+    for (let r = sHr + 1; r < rows.length; r++) {
+      const row = rows[r] || [];
+      const ref = txt(row[sc.ref]);
+      const item = txt(row[sc.item]);
+      if (/^table\b/i.test(ref)) break;
+      if (!ref && !item) continue;
+      if (!/^S?\d+$/i.test(ref) && !item) continue;
+      scope.push({
+        ref: ref || `S${scope.length + 1}`,
+        item,
+        type: txt(row[sc.type]) || 'Baseline',
+        raised: toISO(row[sc.raised]),
+        status: txt(row[sc.status]) || 'Confirmed',
+        comment: txt(row[sc.comment]),
+        row: r + 1,
+      });
+    }
+  }
+
   // Waiting-on / blocked log
   const log = [];
   const lHr = findHeaderRow(rows, ['log id']) >= 0
@@ -452,6 +491,7 @@ function parseSiteSheet(sheet) {
     categories,
     tasks,
     prereqs,
+    scope,
     log,
     problems,
   };

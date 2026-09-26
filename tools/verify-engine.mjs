@@ -24,9 +24,12 @@ const { readWorkbook, parseWorkbook, normStatus, splitIds, screenText, STATUS } 
 const { analyseSite, analysePortfolio, lastReportedWeek, compareSites, comparePortfolios } = await import('../js/core/engine.js');
 const { estimateTokens, estimateRun, capacityCheck, formatTokens, readProviderUsage } =
   await import('../js/core/tokens.js');
-const { buildSitePayload, buildMasterPayload, parseModelJson, buildPrompt, run: runAI, _setOverloadWaits } =
-  await import('../js/core/ai.js');
-const { buildRTF, buildPrintHTML, buildWorkbook } = await import('../js/core/exports.js');
+const { buildSitePayload, buildMasterPayload, parseModelJson, buildPrompt, run: runAI, _setOverloadWaits,
+  isMarkedOverloaded, clearOverloadMemory, _markOverloaded } = await import('../js/core/ai.js');
+const { computeSiteReport, computeMasterReport, scoreRisks, SITE_SECTIONS, MASTER_SECTIONS,
+  provenanceOf, RED, AMBER, GREEN, METRIC_DEFINITIONS, RAG_THRESHOLDS,
+  SITE_REFERENCES, MASTER_REFERENCES, PROVENANCE_NOTE } = await import('../js/core/report.js');
+const { buildRTF, buildPrintHTML, buildWorkbook, reportBlocks } = await import('../js/core/exports.js');
 const { stripSecrets } = await import('../js/core/session.js');
 
 let pass = 0, fail = 0;
@@ -319,19 +322,26 @@ check('resource load aggregates across sites', p.resourceLoad.length > 0);
 
 /* ------------------------ 5. AI boundary ------------------------ */
 
-const payload = buildSitePayload(a);
-check('payload carries computed progress', payload.progress.percentByWeight === 45.5);
-check('payload carries the throughput series', payload.throughput.perWeek.length === 6);
+const siteRep = computeSiteReport(model.sites[0], a, model.template, { reportDate: '2026-02-20' });
+const payload = buildSitePayload(siteRep);
+check('payload carries the computed metrics', payload.metrics.completionWeightedPct === siteRep.metrics.completionWeighted);
+check('payload carries the KPI table', payload.kpis.length === 10, String(payload.kpis.length));
+check('payload carries RAG by dimension', !!payload.ragByDimension.schedule.rag);
 check('payload states the figures are precomputed', /computed by the application/i.test(payload.computedNote));
+check('payload forbids cross-site comparison', /never refer to, compare with or rank/i.test(payload.scopeRule));
 check('payload contains no raw weekly grid', !JSON.stringify(payload).includes('"weekly"'));
 
 const prompt = buildPrompt('site', payload);
-check('prompt instructs against recalculation', /do not recalculate/i.test(prompt) || /Do NOT recalculate/.test(prompt));
+check('prompt instructs against recalculation', /do not recalculate/i.test(prompt));
 check('prompt embeds the payload as JSON', prompt.includes('"site": "F-01"'));
+check('prompt tells the model not to score risks itself', /do not state a score or a rating yourself/i.test(prompt));
 
-const master = buildMasterPayload(p);
-check('master payload lists every site', master.sites.length === 2);
-check('master payload marks the site with no data', master.sites[1].hasData === false);
+const allReports = model.sites.map((st) => computeSiteReport(st, p.sites.find((x) => x.code === st.code), model.template, { reportDate: '2026-02-20' }));
+const masterRep = computeMasterReport(allReports, p, { reportDate: '2026-02-20' });
+const master = buildMasterPayload(masterRep);
+check('master payload lists every selected site', master.ragBySiteAndDimension.length === 2, String(master.ragBySiteAndDimension.length));
+check('master payload carries the priority index', Array.isArray(master.interventionPriorityIndex));
+check('master payload states the selection rule', /never mention, count or compare/i.test(master.scopeRule));
 
 check('json parses when bare', parseModelJson('{"a":1}').a === 1);
 check('json parses when fenced', parseModelJson('```json\n{"a":2}\n```').a === 2);
@@ -410,7 +420,8 @@ check('rtf is balanced', (rtf.match(/\{/g) || []).length === (rtf.match(/\}/g) |
 const html = buildPrintHTML(p, reports, false);
 check('print html is a full document', html.startsWith('<!DOCTYPE html>') && html.includes('</html>'));
 check('print html contains the site', html.includes('F-01'));
-check('print html contains the ai narrative', html.includes('Behind plan and not recovering'));
+// Narrative coverage is asserted against a real computed report in section 10b.
+check('print html renders a document even before the full report exists', html.includes('<body>'));
 check('print html escapes angle brackets',
   !buildPrintHTML({ ...p, file: '<script>x</script>' }, {}, false).includes('<script>x</script>'));
 
@@ -475,18 +486,55 @@ if (fsSync.existsSync(tplPath)) {
 
 /* -------- 10b. the eight report sections survive export -------- */
 
-const secHtml = buildPrintHTML(p, reports, false);
+// Build a real report and export it, so the export is checked against the
+// fourteen-section template rather than against a hand-written stub.
+const expSite = computeSiteReport(model.sites[0], a, model.template, { reportDate: '2026-02-20' });
+const expReports = {
+  'F-01': {
+    key: 'F-01', kind: 'site', title: 'Site F-01', providerLabel: 'Test', model: 'm',
+    tokens: { input: 1, output: 1, estimated: true },
+    computed: expSite,
+    result: {
+      executive: { bottomLine: 'Target not achievable.', keyMessages: ['Two tasks stuck.'],
+        decisions: [{ id: 'D1', decision: 'Re-baseline', owner: 'R1', neededBy: 'W07' }] },
+      notes: { schedule: 'Half the time is gone.', wbs: 'Modelling carries the work.', scope: 'No growth.',
+        constraints: 'One prerequisite overdue.', log: 'Two items open.', resources: 'R2 carries most.',
+        quality: 'Findings are minor.' },
+      risks: scoreRisks([{ id: 'RK1', risk: 'Voids unconfirmed, so MEP slips', probability: 4, impact: 4, strategy: 'Reduce', response: 'Escalate', owner: 'R1' }]),
+      actions: [{ id: 'A1', action: 'Chase R3', owner: 'R1', due: 'W07', priority: 'High', links: 'RK1' }],
+      lookahead: [{ week: 'W07', focus: 'Clear the constraint' }],
+      conclusion: 'Nothing moves until the voids clear.',
+    },
+  },
+};
+const secHtml = buildPrintHTML(p, expReports, false);
 for (const [n, needle] of [
-  [1, 'Introduction'], [2, 'Timeline'], [3, 'Task status'], [4, 'Prerequisites'],
-  [5, 'Waiting on and blocked'], [6, 'Additional interpretations'],
-  [7, 'Visualisation'], [8, 'Conclusions'],
+  [1, 'Introduction'], [2, 'Executive Summary'], [3, 'Performance Dashboard'],
+  [4, 'Schedule Performance'], [5, 'Progress by Work Breakdown'], [6, 'Scope and Change Control'],
+  [7, 'Constraints and Prerequisites'], [8, 'Issues and Waiting-On'], [9, 'Risk Register'],
+  [10, 'Resources and Responsibilities'], [11, 'Quality, Information Management'],
+  [12, 'Actions and Two-Week Lookahead'], [13, 'Conclusion'], [14, 'References'],
 ]) {
   check(`report section ${n} (${needle}) reaches the export`, secHtml.includes(needle), needle);
 }
+check('appendix A reaches the export', secHtml.includes('Metric definitions and RAG thresholds'));
+check('appendix B reaches the export', secHtml.includes('Task-level status register'));
+check('the export carries the document control block', secHtml.includes('BIM-MSDT-SSR-F-01'));
+check('the export states provenance per section',
+  secHtml.includes('[ENGINE') && secHtml.includes('[AI'), 'provenance badges');
+check('the export explains what the provenance labels mean', secHtml.includes('Sections marked ENGINE are calculated'));
 check('computed figures appear in the export alongside the narrative',
-  secHtml.includes('Computed figures') && /Tasks: \d+ total/.test(secHtml));
+  secHtml.includes('Completion (weighted)') && secHtml.includes('Roll-up discrepancies'));
+check('risk score and band appear as computed values', secHtml.includes('RK1 [') && secHtml.includes('P4 x I4'));
 check('the export does not repeat the narrative verbatim in two places',
-  (secHtml.match(/Behind plan and not recovering/g) || []).length === 1);
+  (secHtml.match(/Nothing moves until the voids clear/g) || []).length === 1);
+check('references reach the export', secHtml.includes('PMBOK'));
+
+const rtfFull = buildRTF(reportBlocks(p, expReports));
+check('the Word export carries all fourteen sections',
+  ['Executive Summary', 'Risk Register', 'References'].every((t) => rtfFull.includes(t)));
+check('the Word export is valid rtf', rtfFull.startsWith('{\\rtf1') &&
+  (rtfFull.match(/\{/g) || []).length === (rtfFull.match(/\}/g) || []).length);
 
 const tlA = analyseSite(model.sites[0], model.template);
 check('timeline block computed', !!tlA.timeline && tlA.timeline.weeksElapsed === 6, JSON.stringify(tlA.timeline?.weeksElapsed));
@@ -579,13 +627,53 @@ check('a persistent 503 gives up after five attempts', calls === 5, `calls=${cal
 check('the 503 message says it is the server, not your quota', /not your quota/i.test(err?.message || ''), err?.message);
 check('a persistent 503 is flagged as an overload', err?.overloaded === true);
 
-calls = 0;
+/* ---- the quota fix: an overloaded model must not be hammered site after site ---- */
+
+clearOverloadMemory();
 const seen = [];
-globalThis.fetch = async (url) => { calls++; seen.push(String(url)); return String(url).includes('primary-model') ? resp(503) : resp(200, okBody); };
-rep = await runAI({ kind: 'site', payload: payloadMin, settings: { ...settings, fallbackModel: 'stable-model' } });
-check('after persistent overload the fallback model is used', rep.model === 'stable-model' && rep.fellBack === true, rep.model);
+const fbSettings = { ...settings, fallbackModel: 'stable-model' };
+globalThis.fetch = async (url) => { seen.push(String(url)); return String(url).includes('primary-model') ? resp(503, JSON.stringify({ error: { message: 'This model is currently experiencing high demand.' } })) : resp(200, okBody); };
+
+rep = await runAI({ kind: 'site', payload: payloadMin, settings: fbSettings });
+const primaryCalls1 = seen.filter((u) => u.includes('primary-model')).length;
+check('after overload the fallback model is used', rep.model === 'stable-model' && rep.fellBack === true, rep.model);
 check('the report records which model was asked for', rep.requestedModel === 'primary-model');
-check('the fallback is tried only after the primary exhausts its retries', seen.filter((u) => u.includes('primary-model')).length === 5);
+check('with a fallback available the primary gets 2 tries, not 5', primaryCalls1 === 2, `primary calls=${primaryCalls1}`);
+check('the overloaded model is remembered', isMarkedOverloaded('primary-model'));
+
+// Simulate the rest of a ten-site batch.
+seen.length = 0;
+for (let i = 0; i < 9; i++) await runAI({ kind: 'site', payload: payloadMin, settings: fbSettings });
+const primaryCalls9 = seen.filter((u) => u.includes('primary-model')).length;
+const fallbackCalls9 = seen.filter((u) => u.includes('stable-model')).length;
+check('the remaining sites skip the dead model entirely', primaryCalls9 === 0, `primary calls=${primaryCalls9}`);
+check('the remaining sites each make exactly one request', fallbackCalls9 === 9, `fallback calls=${fallbackCalls9}`);
+check('a ten-site run now costs 12 requests instead of about 60',
+  primaryCalls1 + 1 + primaryCalls9 + fallbackCalls9 === 12, String(primaryCalls1 + 1 + primaryCalls9 + fallbackCalls9));
+
+// The memory expires, so a recovered model gets used again.
+clearOverloadMemory();
+_markOverloaded('primary-model', 1);
+await new Promise((r) => setTimeout(r, 5));
+check('the overload mark expires after its cool-off', !isMarkedOverloaded('primary-model'));
+
+// A success on the primary clears any stale mark.
+_markOverloaded('primary-model', 60000);
+clearOverloadMemory('primary-model');
+globalThis.fetch = async () => resp(200, okBody);
+rep = await runAI({ kind: 'site', payload: payloadMin, settings: fbSettings });
+check('a healthy primary is used when not marked', rep.model === 'primary-model' && !rep.fellBack, rep.model);
+
+// Without a fallback, all five tries are still made.
+clearOverloadMemory();
+calls = 0;
+globalThis.fetch = async () => { calls++; return resp(503, JSON.stringify({ error: { message: 'This model is currently experiencing high demand.' } })); };
+err = null;
+try { await runAI({ kind: 'site', payload: payloadMin, settings }); } catch (e) { err = e; }
+check('without a fallback all five tries are still made', calls === 5, `calls=${calls}`);
+check("the error shows the provider's own message", /experiencing high demand/.test(err?.message || ''), err?.message);
+check('the provider message is kept on the error', err?.providerMessage === 'This model is currently experiencing high demand.');
+clearOverloadMemory();
 
 calls = 0;
 globalThis.fetch = async () => { calls++; return resp(429); };
@@ -610,6 +698,162 @@ const t0c = Date.now();
 try { await runAI({ kind: 'site', payload: payloadMin, settings, signal: ctl.signal }); } catch (e) { err = e; }
 check('cancelling during a retry wait stops immediately', err?.name === 'CancelledError' && Date.now() - t0c < 1500, `${err?.name} after ${Date.now() - t0c}ms`);
 _setOverloadWaits([5000, 12000, 25000, 45000]);
+
+/* ============ 15. report engine: template Appendix A rules ============ */
+
+const rRD = '2026-02-20';
+const srep = computeSiteReport(model.sites[0], a, model.template, { reportDate: rRD });
+
+check('report has all 14 sections in template order',
+  SITE_SECTIONS.length === 14 && SITE_SECTIONS[0].id === 'introduction' && SITE_SECTIONS[13].id === 'references',
+  String(SITE_SECTIONS.length));
+check('master report has all 14 sections', MASTER_SECTIONS.length === 14);
+check('engine sections are marked engine', provenanceOf('site', 'dashboard') === 'engine');
+check('risk register is marked ai + analyst', provenanceOf('site', 'risks') === 'ai+analyst');
+check('conclusion is marked ai', provenanceOf('site', 'conclusion') === 'ai');
+check('the provenance note explains all three labels',
+  /ENGINE/.test(PROVENANCE_NOTE) && /AI/.test(PROVENANCE_NOTE) && /ANALYST/.test(PROVENANCE_NOTE));
+
+check('report id follows the template pattern',
+  /^BIM-MSDT-SSR-F-01-2026-W\d+$/.test(srep.docControl.reportId), srep.docControl.reportId);
+
+/* --- metric formulas, checked against hand arithmetic --- */
+// fixture: 10 live tasks, 4 finished; weights 11 total, 5 done
+check('completion by count = finished / applicable',
+  srep.metrics.completionCount === 40, String(srep.metrics.completionCount));
+check('completion by weight = done weight / total weight',
+  srep.metrics.completionWeighted === 45.5, String(srep.metrics.completionWeighted));
+check('applicable tasks exclude N/A', srep.metrics.applicableTasks === 10 && srep.metrics.naTasks === 1);
+check('time elapsed = (status - start) / (target - start)', (() => {
+  const span = 0 + (new Date('2026-03-01') - new Date('2026-01-05')) / 86400000;
+  const used = (new Date(srep.statusDate) - new Date('2026-01-05')) / 86400000;
+  return srep.metrics.timeElapsed === Math.round((used / span) * 1000) / 10;
+})(), String(srep.metrics.timeElapsed));
+check('SPI proxy = weighted completion / time elapsed',
+  srep.metrics.spiProxy === Math.round((srep.metrics.completionWeighted / srep.metrics.timeElapsed) * 100) / 100,
+  String(srep.metrics.spiProxy));
+check('schedule variance is calendar days, positive when late',
+  srep.metrics.scheduleVariance > 0, String(srep.metrics.scheduleVariance));
+check('weekly throughput is the last week only', srep.metrics.throughput === 0, String(srep.metrics.throughput));
+check('forecast falls back to the indicative method when throughput is zero',
+  srep.metrics.forecastMethod.startsWith('indicative') || srep.metrics.forecastMethod === 'throughput',
+  srep.metrics.forecastMethod);
+
+/* --- RAG thresholds --- */
+check('RAG is computed for all six dimensions plus overall',
+  ['schedule', 'scope', 'constraints', 'resources', 'quality', 'dataIntegrity']
+    .every((k) => [RED, AMBER, GREEN].includes(srep.dimensions[k].rag)) && !!srep.overall);
+check('every dimension states its basis',
+  Object.entries(srep.dimensions).filter(([k]) => k !== 'overall').every(([, v]) => v.basis && v.basis.length > 5));
+check('a badly behind site is RED on schedule', srep.dimensions.schedule.rag === RED, srep.dimensions.schedule.rag);
+check('overall goes RED when schedule is RED', srep.overall === RED, srep.overall);
+check('RAG thresholds table is published in the report', RAG_THRESHOLDS.length === 9);
+check('metric definitions table is published in the report', METRIC_DEFINITIONS.length >= 13);
+
+/* --- the completed-site branch is judged on outcome, not SPI --- */
+const rDoneSite = { ...model.sites[0], actual: '2026-02-25', target: '2026-03-01' };
+const rDoneRep = computeSiteReport(rDoneSite, a, model.template, { reportDate: rRD });
+check('a submitted site is detected', rDoneRep.submitted === true);
+check('a submitted site gets no SPI proxy', rDoneRep.metrics.spiProxy === null);
+check('a site submitted before target is GREEN on schedule', rDoneRep.dimensions.schedule.rag === GREEN, rDoneRep.dimensions.schedule.rag);
+const rLateSite = { ...model.sites[0], actual: '2026-04-30', target: '2026-03-01' };
+const rLateRep = computeSiteReport(rLateSite, a, model.template, { reportDate: rRD });
+check('a site submitted well after target is RED', rLateRep.dimensions.schedule.rag === RED, rLateRep.dimensions.schedule.rag);
+
+/* --- sections that must always exist --- */
+check('KPI table has the ten template indicators', srep.kpis.length === 10, String(srep.kpis.length));
+check('milestones always include start and submission',
+  srep.milestones.some((m) => m.id === 'M1') && srep.milestones.some((m) => m.id === 'M4'));
+check('scope falls back to Type / Date added when no scope table',
+  srep.scope.source === 'task Type / Date added columns', srep.scope.source);
+// The fixture lists every template prerequisite its active categories need, so
+// the rule correctly finds nothing. Give it one that IS missing.
+check('a fully tracked site reports no untracked prerequisites',
+  !srep.constraints.rows.some((r) => r.notTracked));
+const tplGap = {
+  ...model.template,
+  prereqs: [...model.template.prereqs, { id: 'PT99', name: 'Untracked input', provider: 'E1', before: 'C020' }],
+};
+const gapRep = computeSiteReport(model.sites[0], a, tplGap, { reportDate: rRD });
+check('a template prerequisite an active category needs but the site omits is listed as Not tracked',
+  gapRep.constraints.rows.some((r) => r.notTracked && r.id === 'PT99'),
+  gapRep.constraints.rows.filter((r) => r.notTracked).map((r) => r.id).join(','));
+check('an untracked prerequisite counts as open', gapRep.constraints.open.some((r) => r.id === 'PT99'));
+check('log entries are aged in calendar days from the report date',
+  srep.log.rows.every((l) => l.cleared || typeof l.age === 'number'));
+check('log separates internal from external control',
+  srep.log.rows.every((l) => ['Internal', 'External'].includes(l.control)));
+check('roll-up check runs on every category', srep.wbs.rows.every((c) => !!c.check));
+check('appendix B lists every task row', srep.appendixB.length === model.sites[0].detail.tasks.length);
+check('references are attached to every report', srep.references.length === 15);
+check('master references are attached', MASTER_REFERENCES.length >= 12);
+
+/* --- data-integrity rules --- */
+const rDirty = JSON.parse(JSON.stringify(model.sites[0]));
+rDirty.detail.meta.sitecode = 'F-99';
+rDirty.detail.log.push({ id: 'L99', taskId: 'GHOST-1', kind: 'Waiting on', reason: 'x', raised: '2026-01-01', cleared: null });
+const dirtyA = analyseSite(rDirty, model.template);
+const dirtyRep = computeSiteReport(rDirty, dirtyA, model.template, { reportDate: rRD });
+check('a header/register mismatch is caught', dirtyRep.quality.findings.some((f) => f.id === 'Q-HDR'));
+check('a header mismatch makes data integrity RED', dirtyRep.dimensions.dataIntegrity.rag === RED);
+check('a log reference to nothing is caught', dirtyRep.quality.findings.some((f) => f.id === 'Q-REF'));
+
+const rPriv = JSON.parse(JSON.stringify(model.sites[0]));
+rPriv.detail.tasks[0].name = 'Coordinate with John Smith';
+const privRep = computeSiteReport(rPriv, analyseSite(rPriv, model.template), model.template, { reportDate: rRD });
+check('a personal name is caught as a privacy finding', privRep.quality.privacy === true);
+check('privacy makes data integrity RED', privRep.dimensions.dataIntegrity.rag === RED);
+check('the offending text is never reproduced in the finding',
+  !JSON.stringify(privRep.quality.findings).includes('John Smith'));
+check('the privacy finding still says where to look',
+  privRep.quality.privacyLocations.length > 0);
+
+/* --- risk scoring is arithmetic, not judgement --- */
+const rScored = scoreRisks([
+  { risk: 'a', probability: 5, impact: 4 },
+  { risk: 'b', probability: 2, impact: 2 },
+  { risk: 'c', probability: 3, impact: 3 },
+  { risk: 'd', probability: '4', impact: 4, id: 'RKX' },
+]);
+check('risk score is probability x impact', rScored[0].score === 20 && rScored[0].probability === 5);
+check('risks are sorted by score', rScored.map((r) => r.score).join() === '20,16,9,4', rScored.map((r) => r.score).join());
+check('rating band RED at 15 or more', rScored[0].rating === RED);
+check('rating band AMBER between 8 and 14', rScored.find((r) => r.score === 9).rating === AMBER);
+check('rating band GREEN at 7 or less', rScored.find((r) => r.score === 4).rating === GREEN);
+check('string scores are coerced', rScored.find((r) => r.id === 'RKX').score === 16);
+check('missing ids are filled in', rScored.every((r) => !!r.id));
+
+/* --- master report --- */
+const rReps = model.sites.map((st) => computeSiteReport(st, p.sites.find((x) => x.code === st.code), model.template, { reportDate: rRD }));
+const rMrep = computeMasterReport(rReps, p, { reportDate: rRD });
+check('master report id follows its pattern', /^BIM-MSDT-MAR-2026-W\d+$/.test(rMrep.docControl.reportId), rMrep.docControl.reportId);
+check('master counts only the sites supplied', rMrep.counts.sites === rReps.length);
+check('master totals equal the sum of the site reports',
+  rMrep.counts.finished === rReps.reduce((n, r) => n + (r.metrics.finished || 0), 0));
+check('master RAG matrix has one row per site', rMrep.ragMatrix.length === rReps.length);
+check('IPI covers active sites only', rMrep.ipi.length === rReps.filter((r) => !r.submitted).length);
+check('IPI is the sum of its four components', rMrep.ipi.every((x) => {
+  const c = x.components;
+  return Math.abs((c.rag + c.priority + c.time + c.gap) - x.ipi) < 0.11;
+}), JSON.stringify(rMrep.ipi[0]));
+check('IPI is capped at 11', rMrep.ipi.every((x) => x.ipi <= 11));
+check('portfolio RAG goes RED when a third of sites are RED',
+  rMrep.overall === RED || !rReps.some((r) => r.overall === RED), rMrep.overall);
+check('systemic patterns need the site threshold',
+  rMrep.systemicPatterns.every((x) => x.count >= Math.ceil(rReps.length / 2)));
+check('back-end concentration counts only C110-C150',
+  rMrep.kpis.backEndConcentration === null || (rMrep.kpis.backEndConcentration >= 0 && rMrep.kpis.backEndConcentration <= 100));
+check('resource load reports how many active sites each is on',
+  rMrep.resourceLoad.every((r) => typeof r.activeSites === 'number'));
+check('master appendix B lists each site once with its report id',
+  rMrep.appendixB.length === rReps.length && rMrep.appendixB.every((x) => /^BIM-MSDT-SSR-/.test(x.reportId)));
+
+/* --- a site with no weekly data must not crash or invent --- */
+const rEmptyRep = computeSiteReport(model.sites[1], p.sites[1], model.template, { reportDate: rRD });
+check('a site with no weekly data still produces a report', !!rEmptyRep.docControl.reportId);
+check('a site with no data reports null metrics rather than zero',
+  rEmptyRep.metrics.completionWeighted === null, String(rEmptyRep.metrics.completionWeighted));
+check('a site with no data still gets an overall rating', !!rEmptyRep.overall);
 
 /* ------------------------ 11. scale ------------------------ */
 

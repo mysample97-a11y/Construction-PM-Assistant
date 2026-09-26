@@ -21,7 +21,7 @@ import {
 export const PROVIDERS = {
   gemini: {
     label: 'Google Gemini',
-    keyHint: 'Starts with "AIza"',
+    keyHint: 'Paste your Google AI Studio key',
     keyUrl: 'https://aistudio.google.com/apikey',
     defaultModel: 'gemini-2.5-flash',
     suggestions: ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-2.0-flash'],
@@ -29,7 +29,7 @@ export const PROVIDERS = {
   },
   anthropic: {
     label: 'Anthropic Claude',
-    keyHint: 'Starts with "sk-ant-"',
+    keyHint: 'Paste your Anthropic console key',
     keyUrl: 'https://console.anthropic.com/settings/keys',
     defaultModel: 'claude-sonnet-4-5',
     suggestions: ['claude-sonnet-4-5', 'claude-haiku-4-5', 'claude-opus-4-1'],
@@ -37,7 +37,7 @@ export const PROVIDERS = {
   },
   openai: {
     label: 'OpenAI',
-    keyHint: 'Starts with "sk-"',
+    keyHint: 'Paste your OpenAI platform key',
     keyUrl: 'https://platform.openai.com/api-keys',
     defaultModel: 'gpt-4.1-mini',
     suggestions: ['gpt-4.1-mini', 'gpt-4.1', 'gpt-4o'],
@@ -62,199 +62,195 @@ GROUND RULES — these are not stylistic preferences.
 
 Return strictly valid JSON matching the requested shape. No markdown fences, no commentary outside the JSON.`;
 
-/* ============================== payloads ============================== */
-
-/**
- * Compact, human-checkable payload for one site.
+/* ============================== payloads ==============================
  *
- * `noData` is derived rather than trusted: a caller that hands in a missing or
- * half-built analysis must produce an empty payload, not crash the render. A
- * thrown error here takes the whole page down, which is a far worse outcome
- * than a site reporting that it has nothing to say.
- */
-export function buildSitePayload(analysis) {
-  const a = analysis && typeof analysis === 'object' ? analysis : {};
-  const trim = (arr, n) => (Array.isArray(arr) ? arr : []).slice(0, n);
-  const noData = a.noData !== false || !Array.isArray(a.velocity);
-  if (noData) {
+ * The model is handed the COMPUTED REPORT, not the workbook. Every figure has
+ * already been calculated by js/core/report.js, so the model's only job is the
+ * judgement the template marks as AI: the executive summary, one finding per
+ * engine section, the risk register, the actions and the conclusion.
+ *
+ * Nothing here contains the raw weekly grid, and nothing asks for a number to
+ * be derived.
+ * ===================================================================== */
+
+const MAX_ROWS = 40;
+const trim = (a, n = MAX_ROWS) => (Array.isArray(a) ? a.slice(0, n) : []);
+
+export function buildSitePayload(rep) {
+  if (!rep || rep.kind !== 'site') {
     return {
-      site: a.code || '(unknown)',
-      description: a.description || undefined,
-      targetSubmission: a.target || undefined,
-      hasWeeklyData: false,
-      note: 'This site is in the register but has no weekly status data, so nothing about its progress can be measured. Say so plainly rather than inferring anything.',
-      computedRisks: trim(a.risks, 10),
+      reportType: 'site status report', site: rep?.code || '(unknown)', hasData: false,
+      note: 'No computed report is available for this site. Say plainly that it cannot be assessed and why.',
     };
   }
+  const m = rep.metrics;
   return {
-    site: a.code,
-    description: a.description || undefined,
-    wave: a.wave || undefined,
-    coordinator: a.coordinator || undefined,
-    startDate: a.start || undefined,
-    targetSubmission: a.target || undefined,
-    reportingWeek: a.reportingWeek
-      ? { label: a.reportingWeek.label, weekEnding: a.reportingWeek.end }
-      : null,
-    timeline: a.timeline || null,
-    // What the last review said, so this one can speak to what changed rather
-    // than starting from nothing every week.
-    previousPeriod: a.previousPeriod || null,
-    computedNote: 'All figures below were computed by the application from the weekly status grid. Do not recalculate them.',
-    hasWeeklyData: true,
+    reportType: 'site status report',
+    site: rep.code,
+    hasData: true,
+    computedNote: 'Every figure below was computed by the application from the workbook. Treat them as fact. Do not recalculate them, and do not state any figure that is not here.',
+    scopeRule: 'This report covers this site only. Never refer to, compare with or rank against any other site, even if others were analysed in the same run.',
 
-    progress: {
-      tasksLive: a.liveCount,
-      tasksFinished: a.finishedCount,
-      tasksWip: a.wipCount,
-      tasksBlocked: a.blockedCount,
-      tasksWaitingOn: a.waitingCount,
-      tasksNotStarted: a.notStartedCount,
-      tasksNotApplicable: a.naCount,
-      percentByCount: a.pctByCount,
-      percentByWeight: a.pctByWeight,
-      remaining: a.remaining,
+    documentControl: rep.docControl,
+    overallRag: rep.overall,
+    submitted: rep.submitted,
+
+    metrics: {
+      statusDate: m.statusDate,
+      applicableTasks: m.applicableTasks, totalTasks: m.totalTasks, naTasks: m.naTasks,
+      finished: m.finished, wip: m.wip, notStarted: m.notStarted, stuck: m.stuck,
+      completionCountPct: m.completionCount, completionWeightedPct: m.completionWeighted,
+      timeElapsedPct: m.timeElapsed, timeBasedSpiProxy: m.spiProxy,
+      weeklyThroughput: m.throughput,
+      scheduleVarianceDays: m.scheduleVariance,
+      forecastSubmission: m.forecastDate, forecastMethod: m.forecastMethod,
+      indicativeWorkingDaysRemaining: m.indicativeDays,
     },
-    throughput: {
-      perWeek: a.velocity.map((v) => ({ week: v.label, finished: v.count })),
-      averagePerWeek: a.avgVelocity,
-      lastThreeWeeksAverage: a.recentVelocity,
-    },
-    forecast: {
-      basis: 'remaining tasks divided by completion rate',
-      usingAllTimeRate: a.forecastAvg,
-      usingRecentRate: a.forecastRecent,
-      targetWeekNumber: a.targetWeekNo,
-      weeksPastTarget: a.slipWeeks,
-    },
-    categories: a.categories.map((c) => ({
-      id: c.id, name: c.name,
-      yourStatus: c.selfStatus,
-      tasksDone: `${c.doneCount}/${c.liveCount}`,
-      computedPercent: c.computedPct,
-      divergenceFromYourStatus: c.divergence,
-      stuckTasks: c.stuck,
+    kpis: rep.kpis.map((k) => ({ indicator: k.k, actual: k.v, target: k.target, rag: k.rag })),
+    ragByDimension: Object.fromEntries(
+      Object.entries(rep.dimensions).filter(([k]) => k !== 'overall')
+        .map(([k, v]) => [k, { rag: v.rag, basis: v.basis }])),
+
+    milestones: rep.milestones,
+    weekOnWeekMovement: rep.movement.comparable
+      ? {
+        from: rep.movement.fromWeek, to: rep.movement.toWeek,
+        finishedThisWeek: rep.movement.finishedThisWeek, changes: trim(rep.movement.changes, 25),
+      }
+      : { comparable: false, reason: rep.movement.reason },
+
+    progressByCategory: rep.wbs.rows.map((c) => ({
+      id: c.id, name: c.name, applicable: c.liveCount, finished: c.doneCount,
+      percent: c.computedPct, reported: c.selfStatus, rollUpCheck: c.check, stuck: c.stuck,
     })),
-    stuck: trim(a.stuckDetail, 20).map((s) => ({
-      taskId: s.taskId, task: s.name, category: s.category, discipline: s.discipline,
-      status: s.status, weeksStuck: s.weeksStuck, since: s.sinceWeek,
-      reason: s.reason || '(no reason logged)',
-      waitingOn: s.waitingOn || undefined,
-      expectedClear: s.expected || undefined,
-    })),
-    stalledInWip: trim(a.stalled, 12),
-    pastTargetWeek: trim(a.overdue, 20),
-    outstandingPrerequisites: trim(a.outstandingPrereqs, 20),
-    scopeGrowth: {
-      addedAfterKickoff: a.scopeGrowth.additionalCount,
-      originallyAgreed: a.scopeGrowth.regularCount,
-      growthPercent: a.scopeGrowth.growthPct,
-      items: trim(a.scopeGrowth.items, 15),
+    rollUpDiscrepancies: rep.wbs.discrepancies,
+
+    scope: {
+      source: rep.scope.source,
+      items: trim(rep.scope.items, 20),
+      openItems: rep.scope.openItems.length,
+      addedAfterKickoff: rep.scope.additionalCount,
+      addedThenSetNA: rep.scope.additionalSetNA,
+      growthPct: rep.scope.growthPct,
     },
-    runningAheadOfDependencies: trim(a.outOfOrder, 12),
-    resourceLoad: trim(a.resources, 15),
-    dataQualityIssues: trim(a.dataIssues, 20).map((d) => d.detail),
-    computedRisks: trim(a.risks, 20),
+    prerequisites: trim(rep.constraints.rows, 25).map((p) => ({
+      id: p.id, name: p.name, neededFor: p.neededFor, provider: p.provider,
+      requiredByWeek: p.byWeek, status: p.status, rag: p.rag,
+      notTracked: p.notTracked || undefined,
+    })),
+    waitingOnBlockedLog: trim(rep.log.rows, 25).map((l) => ({
+      id: l.id, week: l.week, task: l.taskId, type: l.kind, reason: l.reason,
+      waitingOn: l.waitingOn, raised: l.raised, ageDays: l.age, control: l.control,
+      rag: l.rag, cleared: l.cleared || undefined,
+    })),
+    resources: {
+      assigned: rep.resources.rows.map((r) => ({ resource: r.resource, open: r.open, wip: r.wip, stuck: r.stuck })),
+      highestWip: rep.resources.maxWip,
+      soleProviders: rep.resources.soleProviders,
+      causesBlocked: rep.resources.causesBlocked,
+      externalParties: rep.resources.externalParties,
+      unassignedOpenTasks: rep.resources.unassigned?.open || 0,
+    },
+    dataIntegrityFindings: rep.quality.findings.map((f) => ({
+      id: f.id, finding: f.finding, evidence: f.evidence, impact: f.impact,
+      correction: f.correction, severity: f.severity,
+    })),
   };
 }
 
-export function buildMasterPayload(p) {
+export function buildMasterPayload(mr) {
   return {
-    scope: 'portfolio',
-    generatedAt: p.generatedAt,
-    computedNote: 'All figures were computed by the application. Do not recalculate them.',
-    totals: {
-      sites: p.siteCount,
-      sitesWithData: p.sitesWithData,
-      tasksLive: p.totalTasks,
-      tasksFinished: p.totalDone,
-      percentByCount: p.pctByCount,
-      percentByWeight: p.pctByWeight,
-      stuckTasks: p.totalStuck,
-      tasksPastTargetWeek: p.totalOverdue,
-      tasksAddedAfterKickoff: p.totalAdditional,
-    },
-    sites: p.sites.map((s) => ({
-      site: s.code,
-      wave: s.wave || undefined,
-      coordinator: s.coordinator || undefined,
-      targetSubmission: s.target || undefined,
-      hasData: !s.noData,
-      percentByWeight: s.noData ? null : s.pctByWeight,
-      tasksLive: s.noData ? null : s.liveCount,
-      remaining: s.noData ? null : s.remaining,
-      recentRatePerWeek: s.noData ? null : s.recentVelocity,
-      forecastWeeksNeeded: s.noData ? null : s.forecastRecent?.weeksNeeded ?? null,
-      weeksPastTarget: s.noData ? null : s.slipWeeks,
-      stuckTasks: s.noData ? null : s.stuckCount,
-      topRisk: s.risks?.[0]?.title || null,
-    })),
-    sitesForecastLate: p.slipping,
-    resourceLoadAcrossSites: p.resourceLoad.slice(0, 20),
-    blockersAffectingMoreThanOneSite: p.commonBlockers,
-    waves: p.waves,
-    computedRisks: p.risks,
+    reportType: 'master analysis (portfolio) report',
+    computedNote: 'Every figure below was computed by the application from the individual site reports. Treat them as fact and do not recalculate them.',
+    scopeRule: 'Only the sites listed here were selected. Never mention, count or compare any site that is not in this list.',
+    documentControl: mr.docControl,
+    overallRag: mr.overall,
+    counts: mr.counts,
+    portfolioKpis: mr.kpis,
+    ragBySiteAndDimension: mr.ragMatrix,
+    scheduleBySite: mr.schedule,
+    progressByCategory: mr.categories,
+    scopeBySite: mr.scope,
+    openConstraints: trim(mr.constraints, 30),
+    externalParties: mr.parties,
+    resourceLoad: mr.resourceLoad,
+    resourceLoadCaveat: 'Loading reflects the selected sites only; a resource may also be committed to sites that were not selected.',
+    qualityPatterns: mr.patterns,
+    systemicPatterns: mr.systemicPatterns,
+    interventionPriorityIndex: mr.ipi,
+    siteSummaries: mr.appendixB,
+    noActiveSites: mr.noActiveSites,
   };
 }
 
 /* ============================== schemas ============================== */
 
 const SITE_SCHEMA = `{
-  "introduction": "2-3 sentences introducing this site: what it is, where it sits in its own programme, and the single thing a reader needs to know before the detail. Do not list figures.",
-
-  "timelineNote": "2-4 sentences on time: how far through the planned period this site is against how much work is done, and whether those two are in step. If a previous analysis is given, say what has changed since it. Nothing about individual tasks here.",
-
-  "taskStatusInterpretation": "3-5 sentences interpreting the task position: what the completion rate and the mix of WIP/not-started actually mean for delivery, which categories are carrying the work and which have not started. Do not mention blocked or waiting work here — that has its own section.",
-
-  "prerequisiteInterpretation": "2-4 sentences on prerequisites: what is outstanding, what it is holding up, and whether the pattern suggests an upstream problem. If none are outstanding, say so in one line and move on.",
-
-  "blockedInterpretation": "3-5 sentences on blocked and waiting work: what is stuck, for how long, on whom, and what it will cost if it stays stuck. Distinguish Blocked (inside the team's control) from Waiting on (outside it) because the response differs.",
-
-  "additional": {
-    "risks": [{"risk": "...", "why": "the evidence from the input", "impact": "high"|"medium"|"low"}],
-    "patterns": ["something the figures reveal that is not obvious from any single one of them"],
-    "actions": [{"action": "...", "owner": "R code from the input where known, else 'not recorded'", "byWhen": "a week number or date", "priority": "high"|"medium"|"low", "expectedEffect": "..."}],
-    "watchNextWeek": ["the specific thing that would tell you early if this is getting worse"]
+  "executive": {
+    "bottomLine": "one sentence: the single most important thing about this site, stated as an answer not a summary. Lead with the conclusion.",
+    "keyMessages": ["3-5 bullets, each a claim followed by the evidence from the figures given. Never a figure that is not in the input."],
+    "decisions": [{"id": "D1", "decision": "a decision only a manager can take, phrased as an ask", "owner": "role or R code from the input", "neededBy": "a date or week from the input"}]
   },
 
-  "visualisationNote": "1-3 sentences telling the reader what to look for in the charts below — the shape that matters, not a description of the axes.",
+  "notes": {
+    "schedule": "2-4 sentences on the schedule position and what the forecast rests on. Section 4.",
+    "wbs": "2-3 sentences on where the work sits across categories and what the roll-up checks mean. Section 5.",
+    "scope": "2-3 sentences on scope and change control, including whether growth is being measured honestly. Section 6.",
+    "constraints": "2-3 sentences on prerequisites: what is outstanding and what it gates. Section 7.",
+    "log": "2-3 sentences on blocked and waiting items, distinguishing Internal (the team can fix) from External (must be chased). Section 8.",
+    "resources": "2-3 sentences on loading, single-provider exposure and who is holding work up. Section 10.",
+    "quality": "2-3 sentences on what the data-integrity findings mean for trusting this report. Section 11."
+  },
 
-  "conclusions": {
-    "verdict": "on_track" | "at_risk" | "off_track",
-    "confidence": "high" | "medium" | "low",
-    "confidenceReason": "what limits confidence",
-    "statement": "3-4 sentences drawing the threads together in NEW words. Do not repeat sentences from earlier sections.",
-    "nextSteps": ["the two or three things that must happen before the next review"]
-  }
+  "risks": [{
+    "id": "RK1",
+    "risk": "stated as cause then effect, e.g. 'X is not confirmed, so Y will slip'",
+    "probability": 1, "impact": 1,
+    "strategy": "Avoid" | "Reduce" | "Transfer" | "Accept",
+    "response": "the specific action that changes the probability or the impact",
+    "owner": "role or R code from the input"
+  }],
+
+  "actions": [{"id": "A1", "action": "...", "owner": "role or R code", "due": "date or week", "priority": "High"|"Medium"|"Low", "links": "risk, milestone or finding IDs this addresses"}],
+
+  "lookahead": [{"week": "the next status week label", "focus": "what must happen that week"}],
+
+  "conclusion": "3-5 sentences. State the position, the single most consequential choice, and what changes if it is taken. New words: do not repeat sentences from the sections above."
 }`;
 
 const MASTER_SCHEMA = `{
-  "introduction": "2-3 sentences introducing the programme: how many sites, what they have in common, and the headline position.",
-
-  "timelineNote": "2-4 sentences on where the sites sit against their own dates, including which are in the same wave and therefore competing for the same people. If a previous analysis is given, say what has moved since.",
-
-  "taskStatusInterpretation": "3-5 sentences comparing the sites: who is ahead, who is behind, and whether the spread is explained by start dates or by something else.",
-
-  "prerequisiteInterpretation": "2-4 sentences on prerequisites across the sites, especially any provider appearing on more than one.",
-
-  "blockedInterpretation": "3-5 sentences on blocked and waiting work across the programme. A blocker on one site is a site problem; the same blocker on several is a process problem — say which you are looking at.",
-
-  "additional": {
-    "systemicIssues": [{"issue": "...", "sitesAffected": ["A-01"], "rootCauseHypothesis": "...", "howToTest": "what to check to confirm it", "fixOnceCentrally": "..."}],
-    "resourceConcerns": [{"resource": "R code", "concern": "...", "suggestedAction": "..."}],
-    "actions": [{"action": "...", "owner": "...", "byWhen": "...", "priority": "high"|"medium"|"low", "affectsSites": ["A-01"]}],
-    "whatIsGoingWell": ["worth saying — a report that is only bad news gets discounted"]
+  "executive": {
+    "bottomLine": "one sentence covering the selected sites as a group.",
+    "keyMessages": ["4-6 bullets: portfolio position, schedule, the dominant bottleneck, shared-resource exposure, governance patterns. Each with its evidence."],
+    "decisions": [{"id": "MD1", "decision": "a portfolio-level decision", "owner": "role", "neededBy": "date"}]
   },
 
-  "visualisationNote": "1-3 sentences on what to look for in the charts below.",
+  "notes": {
+    "schedule": "2-4 sentences comparing the sites against their own dates. Section 4.",
+    "bottlenecks": "2-4 sentences on where the remaining work is concentrated and why that matters. Section 5.",
+    "scope": "2-3 sentences on whether scope and change are captured consistently across sites. Section 6.",
+    "constraints": "2-3 sentences on external parties holding work across sites. Section 7.",
+    "resources": "2-4 sentences on shared resources and capacity. Section 8.",
+    "quality": "2-3 sentences on which findings are systemic rather than local. Section 10.",
+    "priority": "2-3 sentences justifying the ranking and naming the tie-break. Section 11."
+  },
 
-  "conclusions": {
-    "verdict": "on_track" | "at_risk" | "off_track",
-    "confidence": "high" | "medium" | "low",
-    "confidenceReason": "...",
-    "statement": "3-4 sentences in NEW words, not a repeat of the sections above.",
-    "nextSteps": ["..."]
-  }
+  "risks": [{
+    "id": "PR1",
+    "risk": "a risk that spans sites or arises from the combination; site-specific risks belong in the site reports",
+    "sitesAffected": ["A-01"],
+    "probability": 1, "impact": 1,
+    "strategy": "Avoid" | "Reduce" | "Transfer" | "Accept",
+    "response": "...", "owner": "role"
+  }],
+
+  "interventions": [{"site": "A-01", "recommendedIntervention": "what to do on this site, one line"}],
+
+  "actions": [{"id": "PA1", "action": "...", "owner": "role", "due": "date", "priority": "High"|"Medium"|"Low", "links": "risk or decision IDs"}],
+
+  "lookahead": [{"week": "week label", "focus": "portfolio focus for that week"}],
+
+  "conclusion": "4-6 sentences: the portfolio position, the pattern behind it, and the few decisions that change the outcome most."
 }`;
 
 /* ============================== prompts ============================== */
@@ -262,12 +258,19 @@ const MASTER_SCHEMA = `{
 export function buildPrompt(kind, payload, followUp = '') {
   const parts = [];
   if (kind === 'master') {
-    parts.push('Review this multi-site BIM delivery programme as a whole. Compare the sites against each other, find what is systemic rather than local, and say what the coordinator should do next week.');
+    parts.push('You are writing the judgement sections of a Master Analysis (portfolio) report over the selected sites. The application has already computed every figure; your job is interpretation, not calculation.');
+    parts.push('Find what is systemic rather than local, where sites compete for the same people, and which decisions change the outcome most.');
     parts.push('\nReturn JSON matching exactly this shape:\n' + MASTER_SCHEMA);
   } else {
-    parts.push(`Review site ${payload.site} for this reporting week.`);
+    parts.push(`You are writing the judgement sections of a Site Status Report for site ${payload.site}. The application has already computed every figure; your job is interpretation, not calculation.`);
+    parts.push('Write for a Project Manager who needs to decide something this week. Lead with the answer, then the evidence.');
     parts.push('\nReturn JSON matching exactly this shape:\n' + SITE_SCHEMA);
   }
+  parts.push('\nRules for the judgement you are asked for:');
+  parts.push('- Score each risk with a probability and an impact from 1 to 5. The application multiplies them and applies the rating band; do not state a score or a rating yourself.');
+  parts.push('- Every claim must trace to a figure in the input. If the data cannot support a point, say what is missing instead of filling the gap.');
+  parts.push('- Name things: task IDs, prerequisite IDs, R codes, dates. "Monitor progress" is not an action.');
+  parts.push('- Say each thing once, in the section where it belongs. The conclusion draws threads together in new words rather than repeating earlier sentences.');
   if (payload.previousPeriod) {
     parts.push('\nA previous review of this same scope is included in the data as "previousPeriod". Use it: say what has moved, what has not, and whether actions raised last time were acted on. Do not simply repeat it.');
   }
@@ -344,9 +347,18 @@ let OVERLOAD_WAITS = [5000, 12000, 25000, 45000];
 /** Test hook only: the real waits total over a minute, far too slow for a suite. */
 export function _setOverloadWaits(arr) { OVERLOAD_WAITS = arr; }
 
-async function callWithRetry(provider, doFetch, { signal, onStatus } = {}) {
-  const maxAttempts = OVERLOAD_WAITS.length + 1;
+/** Pull the provider's own error text out of a response body, if it sent one. */
+function providerMessage(body) {
+  try {
+    const j = JSON.parse(body);
+    return j?.error?.message || j?.message || '';
+  } catch { return String(body || '').slice(0, 200); }
+}
+
+async function callWithRetry(provider, doFetch, { signal, onStatus, maxAttempts: cap } = {}) {
+  const maxAttempts = Math.min(cap || Infinity, OVERLOAD_WAITS.length + 1);
   let lastStatus = null;
+  let lastMessage = '';
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     if (signal?.aborted) throw new CancelledError();
@@ -385,17 +397,21 @@ async function callWithRetry(provider, doFetch, { signal, onStatus } = {}) {
     }
     if ([500, 502, 503, 504, 529].includes(response.status)) {
       lastStatus = response.status;
+      lastMessage = providerMessage(body);
       if (attempt === maxAttempts - 1) {
+        const waited = Math.round(OVERLOAD_WAITS.slice(0, maxAttempts - 1).reduce((a, b) => a + b, 0) / 1000);
         const e = new Error(
-          `${provider} is still overloaded (${response.status}) after ${maxAttempts} attempts over about ${Math.round(OVERLOAD_WAITS.reduce((a, b) => a + b, 0) / 1000)}s. ` +
-          'This is the provider\'s servers being busy for this model, not your quota or tokens. Try again in a few minutes, or switch to a more established model in Settings.');
+          `${provider} is still overloaded (${response.status}) after ${maxAttempts} attempt${maxAttempts === 1 ? '' : 's'}${waited ? ` over about ${waited}s` : ''}.` +
+          `${lastMessage ? ` The provider said: "${lastMessage}"` : ''} ` +
+          'This is the provider\'s servers being busy for this model, not your quota or tokens. Try again later, or switch to a more established model in Settings.');
         e.status = response.status;
         e.overloaded = true;
+        e.providerMessage = lastMessage;
         throw e;
       }
       const hinted = retryAfterSeconds(response, body);
       const base = hinted ? hinted * 1000 : OVERLOAD_WAITS[attempt];
-      await waitWithStatus(base, attempt, maxAttempts, `server busy (${response.status})`, onStatus, signal);
+      await waitWithStatus(base, attempt, maxAttempts, `server busy (${response.status})`, onStatus, signal, lastMessage);
       continue;
     }
     let msg = body.slice(0, 300);
@@ -406,7 +422,7 @@ async function callWithRetry(provider, doFetch, { signal, onStatus } = {}) {
 }
 
 /** Waits with jitter, reporting a live countdown so the user can see it is working. */
-async function waitWithStatus(baseMs, attempt, maxAttempts, why, onStatus, signal) {
+async function waitWithStatus(baseMs, attempt, maxAttempts, why, onStatus, signal, message = '') {
   const ms = Math.round(baseMs * (0.8 + Math.random() * 0.4));
   const until = Date.now() + ms;
   while (Date.now() < until) {
@@ -416,12 +432,13 @@ async function waitWithStatus(baseMs, attempt, maxAttempts, why, onStatus, signa
       attempt: attempt + 2,
       maxAttempts,
       secondsLeft: Math.ceil((until - Date.now()) / 1000),
+      providerMessage: message,
     });
     await sleep(Math.min(1000, until - Date.now()), signal);
   }
 }
 
-async function callGemini({ model, prompt, signal, maxTokens, onStatus }) {
+async function callGemini({ model, prompt, signal, maxTokens, onStatus, maxAttempts }) {
   const key = getApiKey();
   const { signal: s, done } = makeSignal(signal, 120000);
   try {
@@ -435,7 +452,7 @@ async function callGemini({ model, prompt, signal, maxTokens, onStatus }) {
           contents: [{ role: 'user', parts: [{ text: prompt }] }],
           generationConfig: { temperature: 0.3, responseMimeType: 'application/json', maxOutputTokens: maxTokens },
         }),
-      }), { signal, onStatus });
+      }), { signal, onStatus, maxAttempts });
     const data = await res.json();
     const text = data?.candidates?.[0]?.content?.parts?.map((p) => p.text).filter(Boolean).join('') || '';
     if (!text && data?.promptFeedback?.blockReason) {
@@ -445,7 +462,7 @@ async function callGemini({ model, prompt, signal, maxTokens, onStatus }) {
   } finally { done(); }
 }
 
-async function callAnthropic({ model, prompt, signal, maxTokens, onStatus }) {
+async function callAnthropic({ model, prompt, signal, maxTokens, onStatus, maxAttempts }) {
   const key = getApiKey();
   const { signal: s, done } = makeSignal(signal, 120000);
   try {
@@ -461,7 +478,7 @@ async function callAnthropic({ model, prompt, signal, maxTokens, onStatus }) {
         model, max_tokens: maxTokens, temperature: 0.3, system: SYSTEM,
         messages: [{ role: 'user', content: prompt }],
       }),
-    }), { signal, onStatus });
+    }), { signal, onStatus, maxAttempts });
     const headers = readRateLimitHeaders(res);
     const data = await res.json();
     const text = (data?.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
@@ -469,7 +486,7 @@ async function callAnthropic({ model, prompt, signal, maxTokens, onStatus }) {
   } finally { done(); }
 }
 
-async function callOpenAI({ model, prompt, signal, maxTokens, onStatus }) {
+async function callOpenAI({ model, prompt, signal, maxTokens, onStatus, maxAttempts }) {
   const key = getApiKey();
   const { signal: s, done } = makeSignal(signal, 120000);
   try {
@@ -481,7 +498,7 @@ async function callOpenAI({ model, prompt, signal, maxTokens, onStatus }) {
         response_format: { type: 'json_object' },
         messages: [{ role: 'system', content: SYSTEM }, { role: 'user', content: prompt }],
       }),
-    }), { signal, onStatus });
+    }), { signal, onStatus, maxAttempts });
     const data = await res.json();
     return { text: data?.choices?.[0]?.message?.content || '', usage: data?.usage || null, headers: null };
   } finally { done(); }
@@ -504,6 +521,36 @@ export function parseModelJson(text) {
 
 /* ============================== orchestration ============================== */
 
+/*
+ * Overload memory ("circuit breaker").
+ *
+ * Without this, every site in a batch retried an overloaded model five times
+ * before trying the fallback. On a ten-site run that spent about fifty of a
+ * 200-a-day free allowance, and a minute and a half per site, on a model that
+ * was never going to answer. Once a model has proved overloaded, the rest of
+ * the run goes straight to the fallback, and it is only tried again once the
+ * cool-off has passed.
+ */
+const OVERLOAD_COOLOFF_MS = 10 * 60 * 1000;
+const overloadedUntil = new Map();   // model -> timestamp
+
+export function isMarkedOverloaded(model, now = Date.now()) {
+  const t = overloadedUntil.get(model);
+  if (!t) return false;
+  if (now >= t) { overloadedUntil.delete(model); return false; }
+  return true;
+}
+export function overloadedModels(now = Date.now()) {
+  return [...overloadedUntil.entries()]
+    .filter(([m]) => isMarkedOverloaded(m, now))
+    .map(([m, t]) => ({ model: m, minutesLeft: Math.ceil((t - now) / 60000) }));
+}
+export function clearOverloadMemory(model) {
+  if (model) overloadedUntil.delete(model); else overloadedUntil.clear();
+}
+/** Test hook. */
+export function _markOverloaded(model, ms) { overloadedUntil.set(model, Date.now() + ms); }
+
 /**
  * Run one analysis. Returns a report object ready to store.
  * @param {'site'|'master'} kind
@@ -520,19 +567,39 @@ export async function run({ kind, payload, settings, followUp, signal, onStatus 
 
   let usedModel = model;
   let fellBack = false;
+  let skippedPrimary = false;
   let out;
-  try {
-    out = await ADAPTERS[settings.provider]({ model, prompt, signal, maxTokens, onStatus });
-  } catch (e) {
-    // Only an overload is worth a second model. A bad key, a 429 or a 404 would
-    // fail identically on any model, so those propagate unchanged.
-    const fallback = (settings.fallbackModel || '').trim();
-    if (!e?.overloaded || !fallback || fallback === model || signal?.aborted) throw e;
-    onStatus?.({ why: `${model} overloaded — switching to ${fallback}`, attempt: 1, maxAttempts: 1, secondsLeft: 0 });
+  const fallback = (settings.fallbackModel || '').trim();
+  const hasFallback = !!fallback && fallback !== model;
+
+  // Primary is known to be down right now: don't spend requests re-proving it.
+  if (hasFallback && isMarkedOverloaded(model)) {
+    skippedPrimary = true;
+    onStatus?.({ why: `${model} is overloaded (seen in the last few minutes) — using ${fallback}`, attempt: 1, maxAttempts: 1, secondsLeft: 0 });
     out = await ADAPTERS[settings.provider]({ model: fallback, prompt, signal, maxTokens, onStatus });
     usedModel = fallback;
     fellBack = true;
+  } else {
+    try {
+      // With a fallback available, give the primary two tries (about 5s), not
+      // five (about 90s) — there is a better option waiting.
+      out = await ADAPTERS[settings.provider]({
+        model, prompt, signal, maxTokens, onStatus,
+        maxAttempts: hasFallback ? 2 : undefined,
+      });
+    } catch (e) {
+      if (e?.overloaded) overloadedUntil.set(model, Date.now() + OVERLOAD_COOLOFF_MS);
+      // Only an overload is worth a second model. A bad key, a 429 or a 404
+      // would fail identically on any model, so those propagate unchanged.
+      if (!e?.overloaded || !hasFallback || signal?.aborted) throw e;
+      onStatus?.({ why: `${model} overloaded — switching to ${fallback}`, attempt: 1, maxAttempts: 1, secondsLeft: 0, providerMessage: e.providerMessage });
+      out = await ADAPTERS[settings.provider]({ model: fallback, prompt, signal, maxTokens, onStatus });
+      usedModel = fallback;
+      fellBack = true;
+    }
   }
+  // A success on the primary clears any stale mark.
+  if (usedModel === model) overloadedUntil.delete(model);
   const { text, usage, headers } = out;
   const result = parseModelJson(text);
 
@@ -555,6 +622,7 @@ export async function run({ kind, payload, settings, followUp, signal, onStatus 
     model: usedModel,
     requestedModel: model,
     fellBack,
+    skippedPrimary,
     at: new Date().toISOString(),
     ms: Date.now() - started,
     tokens: { ...tokens, estimated: !reported },

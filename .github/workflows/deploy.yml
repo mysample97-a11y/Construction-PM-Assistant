@@ -72,6 +72,11 @@ jobs:
             exit 1
           fi
 
+      # Catches a call to a function that does not exist. Syntax checks pass
+      # such code, and it fails only when that exact line runs.
+      - name: Check every function call resolves
+        run: node tools/check-refs.mjs
+
       - name: Verify the calculation engine
         run: node tools/verify-engine.mjs
 

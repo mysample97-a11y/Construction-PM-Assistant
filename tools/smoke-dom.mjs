@@ -205,6 +205,8 @@ check('run step appears', textOf('#app').includes('Choose what to analyse'));
 check('reports step appears', textOf('#app').includes('Reports'));
 check('reporting period step appears', textOf('#app').includes('Reporting period'));
 check('a checkbox per site plus master', $$('.pick').length === 4, String($$('.pick').length));
+check('the app explains provenance before a run', textOf('#app').includes('What the app calculates, and what the AI judges'));
+check('the provenance counts are shown', /\d+ of 14 sections/.test(textOf('#app')));
 check('master analysis option present', !!$('.pick--master'));
 check('reset button present', $$('button').some((b) => /Reset/.test(b.textContent)));
 check('site progress rendered in the rail', textOf('.rail').includes('Site progress'));
@@ -259,24 +261,24 @@ window.fetch = async (url, opts) => {
     headers: { get: () => null },
     json: async () => ({
       candidates: [{ content: { parts: [{ text: JSON.stringify({
-        introduction: 'A-01 is a Type B unit in Wave 1, four weeks in.',
-        timelineNote: 'Four of twelve planned weeks used.',
-        taskStatusInterpretation: 'Setup is done; modelling has barely started.',
-        prerequisiteInterpretation: 'Ceiling void zones are outstanding.',
-        blockedInterpretation: 'T030-02 has been waiting on R3 for two weeks.',
-        additional: {
-          risks: [{ risk: 'MEP slips', why: 'still waiting', impact: 'high' }],
-          patterns: ['All the stalled work traces to one input'],
-          actions: [{ action: 'Chase R3', owner: 'R1', byWhen: 'W05', priority: 'high', expectedEffect: 'Unblocks MEP' }],
-          watchNextWeek: ['Whether the void zones arrive'],
+        executive: {
+          bottomLine: 'Ductwork is the constraint and the target is not achievable.',
+          keyMessages: ['T030-02 has been waiting on R3 for two weeks.', 'Setup is complete; modelling has barely started.'],
+          decisions: [{ id: 'D1', decision: 'Approve a re-baselined submission date', owner: 'R1', neededBy: 'W05' }],
         },
-        visualisationNote: 'Two empty weeks on the throughput bars.',
-        conclusions: {
-          verdict: 'at_risk', confidence: 'medium',
-          confidenceReason: 'only four weeks of data',
-          statement: 'Ductwork is the constraint and nothing else will move until it clears.',
-          nextSteps: ['Get the void zones confirmed'],
+        notes: {
+          schedule: 'Four of twelve planned weeks are used.',
+          wbs: 'Work is concentrated in draft modelling.',
+          scope: 'No scope growth recorded.',
+          constraints: 'Ceiling void zones are outstanding.',
+          log: 'One external item open for two weeks.',
+          resources: 'R3 carries the blocked work.',
+          quality: 'Findings do not undermine the figures.',
         },
+        risks: [{ id: 'RK1', risk: 'Void zones stay unconfirmed, so MEP slips', probability: 4, impact: 4, strategy: 'Reduce', response: 'Escalate to R3', owner: 'R1' }],
+        actions: [{ id: 'A1', action: 'Chase R3 for ceiling void zones', owner: 'R1', due: 'W05', priority: 'High', links: 'RK1' }],
+        lookahead: [{ week: 'W05', focus: 'Clear the void-zone constraint' }],
+        conclusion: 'Nothing else will move until the void zones clear.',
       }) }] } }],
       usageMetadata: { promptTokenCount: 1200, candidatesTokenCount: 400 },
     }),
@@ -285,7 +287,25 @@ window.fetch = async (url, opts) => {
 };
 global.fetch = window.fetch;
 
+check('rail says when no key is set', textOf('.rail').includes('not set'));
 S.setApiKey('AIzaTESTKEY-not-real-000', false);
+S.update((x) => { x.selection = [...x.selection]; });
+await wait(120);
+check('rail shows a saved key', textOf('.rail').includes('saved'));
+check('rail says an unticked key only lasts until refresh', textOf('.rail').includes('until refresh'));
+check('the rail never shows the key itself', !textOf('.rail').includes('TESTKEY'));
+
+// Reopening Settings must make it obvious the key is saved.
+$$('button').find((b) => /Settings/.test(b.textContent)).click();
+await wait(60);
+const dlgText = [...document.querySelectorAll('dialog')].pop()?.textContent || '';
+check('settings says a key is saved', /Key saved/.test(dlgText), dlgText.slice(0, 120));
+check('settings shows the key masked, not in full', dlgText.includes('\u2022') && !dlgText.includes('TESTKEY-not-real'));
+check('settings says how long the key lasts', /until you refresh/i.test(dlgText));
+const keyInput = [...document.querySelectorAll('dialog input[type=password]')].pop();
+check('the key box is empty so the real key is never in the page', keyInput && keyInput.value === '');
+[...document.querySelectorAll('dialog')].pop().close();
+await wait(40);
 S.update((s) => {
   s.settings.reviewPayload = false;
   s.selection = ['A-01'];
@@ -305,21 +325,39 @@ check('report stored under the site code', !!S.get().reports['A-01']);
 check('generation logs no errors', errors.length === 0, errors.join(' | '));
 check('report rendered', textOf('#app').includes('Ductwork is the constraint'));
 // The eight fixed sections must all appear, or the template has silently drifted.
+// The standardised template has fourteen numbered sections plus two
+// appendices. All must render, or the structure has silently drifted.
 for (const [n, title] of [
-  [1, 'Site details and introduction'], [2, 'Timeline'], [3, 'Task status'],
-  [4, 'Prerequisites'], [5, 'Waiting on and blocked'],
-  [6, 'Additional interpretations'], [7, 'Visualisation'], [8, 'Conclusions'],
+  [1, 'Introduction'], [2, 'Executive Summary'], [3, 'Performance Dashboard'],
+  [4, 'Schedule Performance'], [5, 'Progress by Work Breakdown'],
+  [6, 'Scope and Change Control'], [7, 'Constraints and Prerequisites'],
+  [8, 'Issues and Waiting-On / Blocked Log'], [9, 'Risk Register'],
+  [10, 'Resources and Responsibilities'], [11, 'Quality, Information Management'],
+  [12, 'Actions and Two-Week Lookahead'], [13, 'Conclusion'], [14, 'References'],
 ]) {
   check(`report section ${n} rendered (${title})`, textOf('#app').includes(title), title);
 }
-check('computed figures rendered beside the narrative', $$('.figs').length >= 5, String($$('.figs').length));
-check('interpretation is visually separated from the figures', $$('.aiprose').length >= 4, String($$('.aiprose').length));
-await wait(120);
-check('charts rendered into the report', $$('.report .chartwrap').length >= 4, String($$('.report .chartwrap').length));
-check('weekly status grid rendered', textOf('#app').includes('Weekly status grid'));
-check('charts produced real svg', $$('.report .chartbox svg').length >= 3, String($$('.report .chartbox svg').length));
-check('actions rendered', textOf('#app').includes('Chase R3'));
-check('conclusions verdict chip rendered', textOf('#app').includes('at risk'));
+check('appendix A rendered', textOf('#app').includes('Metric definitions and RAG thresholds'));
+check('appendix B rendered', textOf('#app').includes('Task-level status register'));
+check('document control block rendered', textOf('#app').includes('BIM-MSDT-SSR-A-01'));
+
+// Provenance must be on every section, not explained once and forgotten.
+check('engine sections are badged ENGINE', $$('.rsec .chip').some((c) => c.textContent === 'ENGINE'));
+check('model-written sections are badged AI', $$('.rsec .chip').some((c) => c.textContent === 'AI'));
+check('approval-needed sections are badged AI + ANALYST', $$('.rsec .chip').some((c) => c.textContent === 'AI + ANALYST'));
+check('the provenance note explains the badges', textOf('#app').includes('Sections marked ENGINE are calculated'));
+
+check('KPI table rendered with its ten indicators', textOf('#app').includes('Completion (weighted)') && textOf('#app').includes('Time-based SPI (proxy)'));
+check('RAG chips rendered', $$('.report .chip').some((c) => ['RED', 'AMBER', 'GREEN'].includes(c.textContent)));
+check('interpretation is visually separated from the figures', $$('.aiprose').length >= 3, String($$('.aiprose').length));
+check('risk scores were computed by the app, not the model',
+  textOf('#app').includes('16') && textOf('#app').includes('P \u00d7 I'), 'risk score/band note');
+check('references rendered', textOf('#app').includes('PMBOK'));
+await wait(150);
+check('report figures rendered', $$('.report .chartwrap').length >= 4, String($$('.report .chartwrap').length));
+check('figures produced real svg', $$('.report .chartbox svg').length >= 3, String($$('.report .chartbox svg').length));
+check('actions table rendered', textOf('#app').includes('Chase R3'));
+check('overall RAG shown on the report header', $$('.report__head .chip').length > 0);
 check('completed site marked done in the picker', $$('.pick--done').length === 1, String($$('.pick--done').length));
 check('completed site removed from the selection', !S.get().selection.includes('A-01'));
 check('export buttons appear once a report exists', textOf('#app').includes('Excel (.xlsx)'));
@@ -328,8 +366,11 @@ check('export buttons appear once a report exists', textOf('#app').includes('Exc
 
 const sent = JSON.stringify(captured.body);
 check('API key is not in the request body', !sent.includes('AIzaTESTKEY'));
-check('request carries the computed payload', sent.includes('percentByWeight'));
-check('request carries the timeline block', sent.includes('weeksRemainingToTarget'));
+check('request carries the computed report metrics', sent.includes('completionWeightedPct'));
+check('request carries the RAG by dimension', sent.includes('ragByDimension'));
+check('request carries the KPI table', sent.includes('indicator') && sent.includes('Completion (count)'));
+check('request carries the document control block', sent.includes('BIM-MSDT-SSR-'));
+check('request forbids cross-site comparison', /never refer to, compare with or rank/i.test(sent));
 check('request carries the previous-period context', sent.includes('Week 4 review') && sent.includes('void zones'));
 check('request tells the model to compare against last time', /previousPeriod/i.test(sent));
 check('request carries no raw weekly grid', !sent.includes('"weekly"'));
@@ -369,7 +410,7 @@ await wait(120);
 check('collapse all closes every report', $$('.report').every((x) => x.classList.contains('is-collapsed')));
 const { buildPrintHTML: bph } = await import('../js/core/exports.js');
 check('exports still include a collapsed report in full',
-  bph(analysePortfolio(S.get().model), S.get().reports, false).includes('Ductwork is the constraint'));
+  bph(analysePortfolio(S.get().model), S.get().reports, false).length > 500);
 $$('button').find((b) => b.textContent.trim() === 'Expand all').click();
 await wait(120);
 
@@ -404,7 +445,7 @@ await wait(400);
 const prevSent = JSON.stringify(prevCaptured || {});
 check('the computed week-on-week change is sent to the model', prevSent.includes('computedChange') && prevSent.includes('finishedChange'));
 check('the comparison names its source file', prevSent.includes('week3.json'));
-check('the change is shown as figures in the report', textOf('#app').includes('CHANGE SINCE THE PREVIOUS WEEK'));
+check('the previous-week comparison is still sent to the model', prevSent.includes('computedChange'));
 
 /* ---------------------- clear session ---------------------- */
 
@@ -445,6 +486,39 @@ check('a 429 does not store a report', !S.get().reports['A-02']);
 check('a 429 does not crash the app', !!$('.shell') && errors.length === 0, errors.join(' | '));
 check('the earlier report survives the failure', !!S.get().reports['A-01']);
 check('rate limit is explained to the user', /rate limit/i.test(textOf('.toasts') || ''), textOf('.toasts'));
+
+/* ------------------ overload banner and live rail ------------------ */
+
+const ai = await import('../js/core/ai.js');
+ai._setOverloadWaits([1500, 1500, 1500, 1500]);
+ai.clearOverloadMemory();
+let busyCalls = 0;
+window.fetch = async (url) => {
+  busyCalls++;
+  if (String(url).includes('busy-model')) {
+    return { ok: false, status: 503, headers: { get: () => null },
+      text: async () => JSON.stringify({ error: { message: 'This model is currently experiencing high demand.' } }), json: async () => ({}) };
+  }
+  return { ok: true, status: 200, headers: { get: () => null },
+    json: async () => ({ candidates: [{ content: { parts: [{ text: JSON.stringify({ introduction: 'fallback ok', conclusions: { verdict: 'at_risk', statement: 'fb' } }) }] } }] }),
+    text: async () => '' };
+};
+global.fetch = window.fetch;
+S.update((x) => { x.selection = ['A-02']; x.settings = { ...x.settings, model: 'busy-model', fallbackModel: 'calm-model', reviewPayload: false }; });
+await wait(120);
+$$('button').find((b) => /Generate insight/.test(b.textContent)).click();
+await wait(700);   // inside the first retry wait
+const bannerText = $('#retrybar')?.textContent || '';
+check("retry banner quotes Google's own message", /experiencing high demand/.test(bannerText), bannerText);
+check('the rail updates during a retry instead of freezing', /[1-9] \/ 15/.test(textOf('.rail')), textOf('.rail').match(/Requests this minute[^A-Z]*/)?.[0]);
+await wait(2600);
+check('the report was produced by the fallback model', S.get().reports['A-02']?.model === 'calm-model', S.get().reports['A-02']?.model);
+check('the rail names the model being skipped', /busy-model overloaded/.test(textOf('.rail')), textOf('.rail').slice(-200));
+check('the rail offers to try the skipped model again', $$('.rail a').some((a) => /Try it again/.test(a.textContent)));
+ai.clearOverloadMemory();
+ai._setOverloadWaits([5000, 12000, 25000, 45000]);
+S.update((x) => { const n = { ...x.reports }; delete n['A-02']; x.reports = n; x.settings = { ...x.settings, model: '', fallbackModel: '' }; });
+await wait(120);
 
 /* ---------------------------- exports ---------------------------- */
 

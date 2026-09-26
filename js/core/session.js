@@ -288,6 +288,21 @@ export function clearApiKey() {
 
 export function hasApiKey() { return !!getApiKey(); }
 
+/**
+ * Where the key currently lives, in plain words. The input box never shows the
+ * real key (it would be readable off-screen and would sit in the page), so this
+ * is what tells the user a key is actually saved — and when it will go away.
+ */
+export function keyStatus() {
+  const key = getApiKey();
+  if (!key) return { set: false, where: 'none', lasts: 'No key saved. Generate will ask for one.' };
+  let inSession = false;
+  try { inSession = !!sessionStorage.getItem(KEY_SESSION); } catch { /* private mode */ }
+  return inSession
+    ? { set: true, where: 'tab', masked: maskKey(key), lasts: 'Kept until you close this tab. Survives a page refresh.' }
+    : { set: true, where: 'memory', masked: maskKey(key), lasts: 'Kept until you refresh or close the page.' };
+}
+
 export function maskKey(key) {
   if (!key) return '';
   if (key.length <= 10) return '•'.repeat(key.length);

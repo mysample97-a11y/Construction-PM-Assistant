@@ -6,9 +6,10 @@
   "private": true,
   "scripts": {
     "start": "python3 -m http.server 8000",
-    "test": "node tools/verify-engine.mjs",
+    "test": "node tools/check-refs.mjs && node tools/verify-engine.mjs",
     "test:ui": "node --experimental-vm-modules tools/smoke-dom.mjs",
-    "test:all": "node tools/verify-engine.mjs && node --experimental-vm-modules tools/smoke-dom.mjs"
+    "test:all": "node tools/check-refs.mjs && node tools/verify-engine.mjs && node --experimental-vm-modules tools/smoke-dom.mjs",
+    "check": "node tools/check-refs.mjs"
   },
   "devDependencies": {
     "fake-indexeddb": "^6.2.5",
