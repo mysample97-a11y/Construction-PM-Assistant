@@ -189,7 +189,8 @@ export function renderConstraintAgeing(host, open) {
 export function renderRiskHeatMap(host, risks) {
   if (!risks?.length) { mount(host, chart('Risk heat map', '', empty('No risks proposed.'))); return; }
   const cell = 46, pad = 34, W = pad + 5 * cell + 10, H = pad + 5 * cell + 24;
-  const svg = svgEl('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': 'Risk heat map' });
+  // A small square figure: without a cap it stretches to the full page width.
+  const svg = svgEl('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': 'Risk heat map', style: `max-width:${W + 60}px;width:100%` });
 
   for (let p = 1; p <= 5; p++) {
     for (let i = 1; i <= 5; i++) {
@@ -305,7 +306,7 @@ export function renderCompletionVsTime(host, rows) {
   const x = (v) => M.l + (clamp(v, 0, 100) / 100) * iw;
   const y = (v) => M.t + ih - (clamp(v, 0, 100) / 100) * ih;
 
-  const svg = svgEl('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': 'Completion against time elapsed' });
+  const svg = svgEl('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': 'Completion against time elapsed', style: `max-width:${W + 40}px;width:100%` });
   for (let v = 0; v <= 100; v += 25) {
     svg.appendChild(svgEl('line', { x1: M.l, y1: y(v), x2: W - M.r, y2: y(v), stroke: 'var(--rule-soft)' }));
     svg.appendChild(text(M.l - 6, y(v) + 3.5, `${v}%`, { size: 9, anchor: 'end', fill: 'var(--ink-3)' }));
@@ -447,3 +448,61 @@ export function renderIpi(host, ipi) {
       el('span', { class: 'swatch', style: { background: col } }), label,
     ])))));
 }
+
+/* ============================================================
+   Serialising figures for the PDF
+
+   The printed report must show the same figures as the screen, in the same
+   places. Each renderer paints into a detached element and its markup is
+   lifted out, so there is exactly one implementation of every figure rather
+   than a screen version and a print version that can drift apart.
+   ============================================================ */
+
+const FIGURES = {
+  kpiDashboard: (d) => renderKpiDashboard(d.host, d.c),
+  milestoneTimeline: (d) => renderMilestoneTimeline(d.host, d.c),
+  categoryProgress: (d) => renderCategoryProgressReport(d.host, d.c.wbs.rows),
+  constraintAgeing: (d) => renderConstraintAgeing(d.host, d.c.log.open),
+  riskHeatMap: (d) => renderRiskHeatMap(d.host, d.risks),
+  ragMatrix: (d) => renderRagMatrix(d.host, d.c.ragMatrix),
+  scheduleAcrossSites: (d) => renderScheduleAcrossSites(d.host, d.c.schedule),
+  completionVsTime: (d) => renderCompletionVsTime(d.host, d.c.schedule),
+  categoryBySite: (d) => renderCategoryBySite(d.host, d.c.categories, d.c.docControl.sites),
+  partyDependency: (d) => renderPartyDependency(d.host, d.c.parties),
+  resourceAcrossSites: (d) => renderResourceAcrossSites(d.host, d.c.resourceLoad),
+  findingsBySite: (d) => renderFindingsBySite(d.host, d.c.patterns, d.c.docControl.sites),
+  ipi: (d) => renderIpi(d.host, d.c.ipi),
+};
+
+/**
+ * Render one figure and return its HTML. Returns '' when there is no document
+ * (the test harness) or the figure fails, so a broken chart can never take the
+ * whole export down.
+ */
+export function figureHTML(fig, c, risks) {
+  const fn = FIGURES[fig];
+  if (!fn || typeof document === 'undefined' || !c) return '';
+  try {
+    const host = document.createElement('div');
+    fn({ host, c, risks: risks || [] });
+    return host.innerHTML;
+  } catch {
+    return '';
+  }
+}
+
+export const FIGURE_NAMES = {
+  kpiDashboard: 'Performance dashboard',
+  milestoneTimeline: 'Baseline against actual or forecast',
+  categoryProgress: 'Task status by category',
+  constraintAgeing: 'Age of open waiting-on / blocked items',
+  riskHeatMap: 'Risk heat map',
+  ragMatrix: 'RAG status of every selected site',
+  scheduleAcrossSites: 'Baseline, target and forecast by site',
+  completionVsTime: 'Completion against time elapsed',
+  categoryBySite: 'Completion by category and site',
+  partyDependency: 'Open items each party is holding',
+  resourceAcrossSites: 'Resource assignment across the selected sites',
+  findingsBySite: 'Findings by site',
+  ipi: 'Intervention Priority Index',
+};

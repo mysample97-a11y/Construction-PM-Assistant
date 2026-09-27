@@ -60,7 +60,10 @@ Object.defineProperty(window.HTMLElement.prototype, 'showModal', {
   value() { this.setAttribute('open', ''); }, writable: true, configurable: true,
 });
 Object.defineProperty(window.HTMLElement.prototype, 'close', {
-  value() { this.removeAttribute('open'); this.dispatchEvent(new window.Event('close')); },
+  // Browsers queue the close event as a task. Firing it inline (as this shim
+  // first did) masked a real ordering bug in the confirm dialog, so the shim
+  // now matches the specified behaviour.
+  value() { this.removeAttribute('open'); setTimeout(() => this.dispatchEvent(new window.Event('close')), 0); },
   writable: true, configurable: true,
 });
 if (!window.crypto?.randomUUID) {
@@ -519,6 +522,132 @@ ai.clearOverloadMemory();
 ai._setOverloadWaits([5000, 12000, 25000, 45000]);
 S.update((x) => { const n = { ...x.reports }; delete n['A-02']; x.reports = n; x.settings = { ...x.settings, model: '', fallbackModel: '' }; });
 await wait(120);
+
+/* ============ a failed run must leave a record, not a fading toast ============ */
+
+const ai3 = await import('../js/core/ai.js');
+ai3._setOverloadWaits([15, 15, 15, 15]);
+ai3.clearOverloadMemory();
+let downCalls = 0;
+window.fetch = async () => {
+  downCalls++;
+  return { ok: false, status: 503, headers: { get: () => null },
+    text: async () => JSON.stringify({ error: { message: 'The model is overloaded.' } }), json: async () => ({}) };
+};
+global.fetch = window.fetch;
+
+S.update((x) => {
+  x.reports = {};
+  x.selection = ['A-01'];
+  x.includeMaster = false;
+  x.lastRun = null;
+  x.settings = { ...x.settings, model: 'down-primary', fallbackModel: 'down-fallback', reviewPayload: true };
+});
+await wait(150);
+
+// reviewPayload is on, so the confirm dialog must appear and "Send it" must work.
+$$('button').find((b) => /Generate insight/.test(b.textContent)).click();
+await wait(150);
+const confirmDlg = [...document.querySelectorAll('dialog')].pop();
+check('the confirm dialog appears when payload review is on', !!confirmDlg);
+const sendBtn = confirmDlg && [...confirmDlg.querySelectorAll('button')].find((b) => /Send it/.test(b.textContent));
+check('the confirm dialog has a Send button', !!sendBtn);
+sendBtn.click();
+await wait(1400);
+
+check('pressing Send actually starts the run', downCalls > 0, `${downCalls} calls`);
+check('both the primary and the fallback were tried',
+  downCalls >= 3, `${downCalls} calls`);
+check('nothing is stored when the run fails', !S.get().reports['A-01']);
+check('the failure is recorded in the session, not only toasted',
+  S.get().lastRun?.failures?.length === 1, JSON.stringify(S.get().lastRun?.failures?.length));
+check('the record names the site that failed', S.get().lastRun.failures[0].key === 'A-01');
+check('the record says both models were overloaded',
+  /Both models are overloaded/.test(S.get().lastRun.failures[0].message), S.get().lastRun.failures[0].message.slice(0, 60));
+
+// The toast fades after ten seconds; the panel must not.
+$$('.toasts').forEach((t) => t.remove());
+S.update((x) => { x.selection = [...x.selection]; });
+await wait(150);
+check('a persistent panel explains the failure after the toast has gone',
+  textOf('#app').includes('Last run stopped'), 'panel missing');
+check('the panel names the site', /A-01 was not generated/.test(textOf('#app')));
+check('the panel says no tokens were spent', /never reached the model/.test(textOf('#app')));
+check('the panel offers to re-select what failed', textOf('#app').includes('Re-select what failed'));
+check('the failed site is marked in the picker', !!$('.pick--failed'));
+
+// A second run must not re-prove a model already known to be down.
+const firstRunCalls = downCalls;
+downCalls = 0;
+$$('button').find((b) => /Generate insight/.test(b.textContent)).click();
+await wait(150);
+const d2 = [...document.querySelectorAll('dialog')].pop();
+d2 && [...d2.querySelectorAll('button')].find((b) => /Send it/.test(b.textContent))?.click();
+await wait(1200);
+check('a repeat run fails faster because both models are remembered as down',
+  downCalls > 0 && downCalls < firstRunCalls, `${downCalls} vs ${firstRunCalls}`);
+
+// Dismiss restores a clean panel.
+$$('button').find((b) => b.textContent.trim() === 'Dismiss')?.click();
+await wait(150);
+check('the failure panel can be dismissed', !textOf('#app').includes('Last run stopped'));
+
+ai3.clearOverloadMemory();
+ai3._setOverloadWaits([5000, 12000, 25000, 45000]);
+S.update((x) => { x.reports = keptReports; x.lastRun = null; x.settings = { ...x.settings, model: '', fallbackModel: '', reviewPayload: false }; });
+await wait(150);
+
+/* ============ exports: scope, figures and print colours ============ */
+
+{
+  const exp = await import('../js/core/exports.js');
+  const pAll = analysePortfolio(S.get().model);
+  // Exactly one site analysed, three in the register.
+  const one = { 'A-01': S.get().reports['A-01'] };
+  check('export scope test has a real report with its computed half', !!one['A-01']?.computed);
+
+  // The charts-ON path. Tests previously only ran it with charts off, which is
+  // how a reference to a removed variable reached the shipped build.
+  let pdf = '';
+  let threw = null;
+  try { pdf = exp.buildPrintHTML(pAll, one, true); } catch (e) { threw = e; }
+  check('the PDF export runs with figures switched on', !threw, threw?.message);
+
+  const pdfText = pdf.replace(/<[^>]+>/g, ' ');
+  check('the PDF reports only the analysed site',
+    /Site Status Report — A-01/.test(pdf) && !/Site Status Report — A-0[23]/.test(pdf));
+  check('unanalysed register sites never appear in the PDF',
+    !/\bA-02\b/.test(pdfText) && !/\bA-03\b/.test(pdfText),
+    (pdfText.match(/\bA-0[23]\b[^.]{0,40}/) || [''])[0]);
+  check('the old per-site chart appendix is gone', !/Charts — /.test(pdf));
+  check('figures are embedded in the PDF', (pdf.match(/<svg/g) || []).length >= 3, String((pdf.match(/<svg/g) || []).length));
+  check('figures sit inside their sections, not appended at the end',
+    pdf.indexOf('<svg') > -1 && pdf.indexOf('<svg') < pdf.indexOf('References'));
+  check('no CSS variable is left unresolved in the PDF', !/var\(--/.test(pdf));
+  check('no figure prints a black fill', !/fill="(#000|#000000|black)"/i.test(pdf));
+  check('the risk heat map is capped rather than filling the page', /aria-label="Risk heat map"[^>]*max-width/.test(pdf));
+
+  const rtf = exp.buildRTF(exp.reportBlocks(pAll, one));
+  check('unanalysed register sites never appear in the Word export',
+    !/\bA-02\b/.test(rtf) && !/\bA-03\b/.test(rtf));
+
+  const xwb = exp.buildWorkbook(pAll, one);
+  const xtext = xwb.SheetNames.map((n) => JSON.stringify(XLSX.utils.sheet_to_json(xwb.Sheets[n], { header: 1 }))).join(' ');
+  check('the Excel Sites sheet lists only the analysed site',
+    XLSX.utils.sheet_to_json(xwb.Sheets.Sites, { header: 1 }).slice(1).map((r) => r[0]).join() === 'A-01');
+  check('unanalysed register sites never appear in the Excel export',
+    !/\bA-02\b/.test(xtext) && !/\bA-03\b/.test(xtext));
+  check('the Excel summary says which sites it covers', /Sites in this export/.test(xtext));
+
+  // resolveCssVars: literal colours, never black on an unknown name
+  check('known colour variables resolve to literals', exp.resolveCssVars('fill="var(--sign)"') === 'fill="#0E9F6E"' || /#[0-9A-Fa-f]{6}/.test(exp.resolveCssVars('fill="var(--sign)"')));
+  check('an unknown colour variable falls back to grey, not black', exp.resolveCssVars('var(--no-such-colour)') === '#7C769D');
+  check('a variable fallback is honoured', exp.resolveCssVars('var(--no-such, #123456)') === '#123456');
+
+  // No reports: the export must not fall back to listing the register.
+  const none = exp.buildPrintHTML(pAll, {}, true).replace(/<[^>]+>/g, ' ');
+  check('with no reports, the export lists no sites at all', !/\bA-0[123]\b/.test(none));
+}
 
 /* ---------------------------- exports ---------------------------- */
 

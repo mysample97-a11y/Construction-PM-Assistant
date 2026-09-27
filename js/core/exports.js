@@ -14,11 +14,63 @@
 import { downloadBlob, fmtDate } from './util.js';
 import { chartsToHTML } from './charts.js';
 import { PROVENANCE_NOTE, METRIC_DEFINITIONS, RAG_THRESHOLDS } from './report.js';
+import { figureHTML, FIGURE_NAMES } from './report-charts.js';
 
 /* ================================ Excel ================================ */
 
-export function buildWorkbook(portfolio, reports) {
+/**
+ * Restrict an export to what the user actually analysed.
+ *
+ * The export used to walk every site in the workbook's register, so analysing
+ * one site produced a document covering all twelve — including sites nobody
+ * reviewed. Reports are the unit of work: only sites with a generated report
+ * (or covered by a generated master analysis) are exported.
+ */
+export function scopeToReports(portfolio, reports) {
+  const all = Object.values(reports || {});
+  const codes = new Set();
+  for (const r of all) {
+    if (r.kind === 'master') (r.computed?.docControl?.sites || []).forEach((c) => codes.add(c));
+    else if (r.key) codes.add(r.key);
+  }
+  const sites = (portfolio?.sites || []).filter((s) => codes.has(s.code));
+  // Programme-level risks are computed across the WHOLE register, so one about
+  // "5 of 5 sites" would drag unanalysed sites into a single-site export. Keep a
+  // programme risk only if every site code it names is in scope.
+  const risks = (portfolio?.risks || []).filter((x) => {
+    const named = new Set((`${x.title} ${x.detail}`.match(/\b[A-Z]-\d+\b/g) || []));
+    if (!named.size) return !!all.some((r) => r.kind === 'master');   // unnamed = portfolio-wide
+    return [...named].every((c) => codes.has(c));
+  });
+  const withData = sites.filter((s) => !s.noData);
+  const sum = (f) => withData.reduce((n, x) => n + (Number(f(x)) || 0), 0);
+  const live = sum((x) => x.liveCount);
+  const done = sum((x) => x.finishedCount);
+  const tw = sum((x) => x.totalWeight);
+  const dw = sum((x) => x.doneWeight);
+  return {
+    ...portfolio,
+    sites,
+    risks,
+    siteCount: sites.length,
+    sitesWithData: withData.length,
+    totalTasks: live,
+    totalDone: done,
+    pctByCount: live ? Math.round((done / live) * 1000) / 10 : 0,
+    pctByWeight: tw ? Math.round((dw / tw) * 1000) / 10 : 0,
+    totalStuck: sum((x) => x.stuckCount),
+    totalOverdue: withData.reduce((n, x) => n + (x.overdue?.length || 0), 0),
+    totalAdditional: withData.reduce((n, x) => n + (x.scopeGrowth?.additionalCount || 0), 0),
+    resourceLoad: (portfolio?.resourceLoad || [])
+      .map((r) => ({ ...r, sites: (r.sites || []).filter((x) => codes.has(x.code)) }))
+      .filter((r) => r.sites.length),
+    scopedTo: [...codes],
+  };
+}
+
+export function buildWorkbook(portfolioAll, reports) {
   if (!window.XLSX) throw new Error('The spreadsheet writer did not load.');
+  const portfolio = scopeToReports(portfolioAll, reports);
   const XLSX = window.XLSX;
   const wb = XLSX.utils.book_new();
   const add = (name, aoa, widths) => {
@@ -32,8 +84,9 @@ export function buildWorkbook(portfolio, reports) {
     ['Generated', new Date().toISOString().slice(0, 16).replace('T', ' ')],
     ['Source file', portfolio.file || ''],
     [],
-    ['Sites in register', portfolio.siteCount],
+    ['Sites analysed', portfolio.siteCount],
     ['Sites with weekly data', portfolio.sitesWithData],
+    ['Sites in this export', portfolio.scopedTo.join(', ') || 'none'],
     ['Live tasks', portfolio.totalTasks],
     ['Finished', portfolio.totalDone],
     ['Progress by count (%)', portfolio.pctByCount],
@@ -143,6 +196,7 @@ export function buildRTF(blocks) {
       case 'bullet': return `\\pard\\fi-200\\li400\\sa60 \\bullet\\tab ${t}\\par `;
       case 'rule': return '\\pard\\brdrb\\brdrs\\brdrw10\\brsp20\\par ';
       case 'pagebreak': return '\\page ';
+      case 'figure': return `\\pard\\sa120\\i [Figure: ${rtfEscape(b.text)} — shown in the app and in the PDF export]\\i0\\par `;
       default: return `\\pard\\sa120 ${t}\\par `;
     }
   }).join('');
@@ -178,11 +232,10 @@ export function reportBlocks(portfolio, reports) {
   }
 
   if (!all.length) {
+    // No analysis run means nothing to report. Listing the register here would
+    // put sites nobody reviewed into a document someone else will read.
     b.push({ style: 'h2', text: 'No reports generated' });
-    b.push({ style: 'p', text: 'The computed figures below are available, but no analysis has been run yet.' });
-    for (const s of (portfolio?.sites || [])) {
-      b.push({ style: 'bullet', text: `${s.code}: ${s.noData ? 'no weekly data' : `${s.finishedCount} of ${s.liveCount} tasks finished`}` });
-    }
+    b.push({ style: 'p', text: 'No analysis has been run, so there is nothing to export. Select sites in section 4 and generate a report first.' });
   }
   return b;
 }
@@ -215,6 +268,8 @@ function oneReport(rep) {
     b.push({ style: 'h2', text: titleOf(id) });
     b.push({ style: 'meta', text: badge(id) });
   };
+  // Figures go where they sit on screen, not in a pile at the end.
+  const fig = (name) => b.push({ style: 'figure', fig: name, c, risks: r.risks || [], text: FIGURE_NAMES[name] || name });
   const para = (t) => { if (t) b.push({ style: 'p', text: t }); };
   const bullets = (arr, fmt) => {
     for (const x of (Array.isArray(arr) ? arr : [])) b.push({ style: 'bullet', text: typeof x === 'string' ? x : fmt(x) });
@@ -247,7 +302,9 @@ function oneReport(rep) {
     for (const m of c.ragMatrix) {
       b.push({ style: 'bullet', text: `${m.code}: schedule ${m.schedule}, scope ${m.scope}, constraints ${m.constraints}, resources ${m.resources}, quality ${m.quality}, data ${m.dataIntegrity} — overall ${m.overall}` });
     }
+    fig('ragMatrix');
   } else {
+    fig('kpiDashboard');
     for (const k of c.kpis) b.push({ style: 'bullet', text: `${k.k}: ${k.v ?? '—'} (target ${k.target})${k.rag ? ` — ${k.rag}` : ''}` });
     b.push({ style: 'h3', text: 'Status by dimension' });
     for (const [k, v] of Object.entries(c.dimensions)) {
@@ -258,10 +315,13 @@ function oneReport(rep) {
 
   /* 4 */ sec('schedule');
   if (isMaster) {
+    fig('scheduleAcrossSites');
+    fig('completionVsTime');
     for (const s of c.schedule) {
       b.push({ style: 'bullet', text: `${s.code}: target ${s.target || '—'}, ${s.submitted ? 'submitted' : 'forecast'} ${s.forecast || '—'}${s.variance == null ? '' : `, variance ${s.variance > 0 ? '+' : ''}${s.variance} d`}, ${s.completionWeighted ?? '—'}% complete against ${s.timeElapsed ?? '—'}% of time — ${s.overall}` });
     }
   } else {
+    fig('milestoneTimeline');
     b.push({ style: 'h3', text: 'Milestones' });
     for (const m of c.milestones) {
       b.push({ style: 'bullet', text: `${m.id} ${m.name}: baseline ${m.baseline || '—'}, actual/forecast ${m.actual || '—'}${m.variance == null ? '' : `, variance ${m.variance > 0 ? '+' : ''}${m.variance} d`} — ${m.status} (${m.rag})` });
@@ -281,12 +341,14 @@ function oneReport(rep) {
 
   /* 5 */ if (isMaster) {
     sec('bottlenecks');
+    fig('categoryBySite');
     for (const x of c.categories.filter((y) => y.applicable > 0)) {
       b.push({ style: 'bullet', text: `${x.id} ${x.name}: ${x.finished}/${x.applicable} finished, ${x.open} open${x.stuckSites.length ? `, stuck on ${x.stuckSites.join(', ')}` : ''}` });
     }
     para(r.notes?.bottlenecks);
   } else {
     sec('wbs');
+    fig('categoryProgress');
     row('Roll-up discrepancies', String(c.wbs.discrepancies));
     for (const x of c.wbs.rows) {
       b.push({ style: 'bullet', text: `${x.id} ${x.name}: ${x.doneCount}/${x.liveCount} (${x.liveCount ? `${x.computedPct}%` : 'N/A'}), reported ${x.selfStatus || '—'} — ${x.consistent ? 'consistent' : x.check}` });
@@ -307,6 +369,7 @@ function oneReport(rep) {
 
   /* 7 */ sec('constraints');
   if (isMaster) {
+    fig('partyDependency');
     for (const x of c.parties) b.push({ style: 'bullet', text: `${x.party}: ${x.count} open across ${x.sites.join(', ')}` });
   } else {
     for (const x of c.constraints.rows) {
@@ -319,6 +382,7 @@ function oneReport(rep) {
   /* 8 — site only */
   if (!isMaster) {
     sec('log');
+    if (c.log.open.length) fig('constraintAgeing');
     if (c.log.rows.length) {
       for (const l of c.log.rows) {
         b.push({ style: 'bullet', text: `${l.id} (${l.kind}, ${l.control}): ${l.reason} — waiting on ${l.waitingOn || '—'}, raised ${l.raised || '—'}, age ${l.age == null ? 'undated' : `${l.age} d`} (${l.rag})` });
@@ -329,6 +393,7 @@ function oneReport(rep) {
 
   /* 9 */ sec('risks');
   if (r.risks?.length) {
+    fig('riskHeatMap');
     for (const x of r.risks) {
       b.push({ style: 'bullet', text: `${x.id} [${x.rating} ${x.score}] ${x.risk} — P${x.probability} x I${x.impact}; ${x.strategy}: ${x.response} (${x.owner})${x.sitesAffected ? ` [${x.sitesAffected.join(', ')}]` : ''}` });
     }
@@ -337,6 +402,7 @@ function oneReport(rep) {
 
   /* 10 */ sec('resources');
   if (isMaster) {
+    fig('resourceAcrossSites');
     for (const x of c.resourceLoad) b.push({ style: 'bullet', text: `${x.resource}: ${x.open} open across ${x.sites.join(', ')} — ${x.activeSites} active, load ${x.load}` });
     para('Loading reflects the selected sites only.');
   } else {
@@ -348,6 +414,7 @@ function oneReport(rep) {
 
   /* 11 */ sec('quality');
   if (isMaster) {
+    fig('findingsBySite');
     for (const x of c.patterns) b.push({ style: 'bullet', text: `${x.pattern} — ${x.count} site(s): ${x.sites.join(', ')}${x.systemic ? ' [SYSTEMIC]' : ''}. ${x.correction}` });
   } else if (c.quality.findings.length) {
     for (const f of c.quality.findings) b.push({ style: 'bullet', text: `${f.id} ${f.finding} — ${f.evidence} Impact: ${f.impact} Correction: ${f.correction}` });
@@ -357,6 +424,7 @@ function oneReport(rep) {
   /* 11b master prioritisation */
   if (isMaster) {
     sec('priority');
+    if (c.ipi.length) fig('ipi');
     if (c.ipi.length) {
       c.ipi.forEach((x, i) => b.push({ style: 'bullet', text: `${i + 1}. ${x.code} — IPI ${x.ipi} (RAG ${x.components.rag}, priority ${x.components.priority}, time ${x.components.time}, gap ${x.components.gap}); ${x.overall}, ${x.daysToTarget == null ? 'no target' : `${x.daysToTarget} days to target`}` }));
       bullets(r.interventions, (x) => `${x.site}: ${x.recommendedIntervention}`);
@@ -417,17 +485,55 @@ const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<
  * `withCharts` is optional because the function is also called from the test
  * harness, where there is no layout engine to render SVG into.
  */
+/*
+ * Colours for printing.
+ *
+ * The figures are drawn with the app's CSS variables. On screen those resolve
+ * against the page stylesheet; in the separate print window they only resolve
+ * if every variable is declared again there — and an undeclared colour in SVG
+ * silently falls back to BLACK. That is how bar tracks printed as black blocks
+ * and legend swatches printed blank.
+ *
+ * So every var(--x) is replaced with its literal value at the moment the figure
+ * is serialised. The printed file then depends on no variables at all, and a
+ * future figure using a new colour cannot break printing.
+ */
+const PRINT_PALETTE = {
+  '--paper': '#EFEDFB', '--paper-deep': '#E3DFF8', '--sheet': '#FFFFFF', '--sheet-alt': '#F7F5FE',
+  '--block': '#241E58', '--block-2': '#332B76', '--block-3': '#1A1544',
+  '--ink': '#1E1B36', '--ink-2': '#4A4570', '--ink-3': '#7C769D', '--ink-inv': '#EAE7FB', '--ink-inv-2': '#ABA3DB',
+  '--rule': '#D9D4F3', '--rule-soft': '#EAE7FA', '--rule-hard': '#B5ACE9', '--rule-inv': '#3C3486',
+  '--blueprint': '#5B4FE9', '--blueprint-lo': '#EDEBFD', '--blueprint-hi': '#4A3FD6',
+  '--sign': '#0E9F6E', '--sign-lo': '#E2F7EF', '--hivis': '#C2740A', '--hivis-lo': '#FCF2DF',
+  '--survey': '#DC2626', '--survey-lo': '#FDEAEA', '--conc': '#7C769D', '--conc-lo': '#ECEAF7',
+  '--plum': '#8B5CF6', '--plum-lo': '#F2EDFE',
+  '--st-not': '#C3BEDF', '--st-wip': '#5B4FE9', '--st-blocked': '#DC2626',
+  '--st-waiting': '#C2740A', '--st-done': '#0E9F6E', '--st-na': '#E6E3F2',
+  '--font-ui': 'Arial, Helvetica, sans-serif', '--font-data': 'Consolas, monospace',
+};
+
+export function resolveCssVars(html) {
+  let live = null;
+  try {
+    if (typeof getComputedStyle === 'function' && typeof document !== 'undefined') {
+      live = getComputedStyle(document.documentElement);
+    }
+  } catch { live = null; }
+  const valueOf = (name) => {
+    const v = live ? live.getPropertyValue(name).trim() : '';
+    return v || PRINT_PALETTE[name] || null;
+  };
+  // Also handles the fallback form var(--x, #fff).
+  return String(html).replace(/var\((--[a-zA-Z0-9-]+)\s*(?:,\s*([^)]+))?\)/g, (m, name, fb) => {
+    const v = valueOf(name);
+    if (v) return v;
+    if (fb) return fb.trim();
+    return '#7C769D';          // never black: a neutral grey is the safe failure
+  });
+}
+
 export function buildPrintHTML(portfolio, reports, withCharts = true) {
   const blocks = reportBlocks(portfolio, reports);
-  let chartHTML = '';
-  if (withCharts && typeof document !== 'undefined') {
-    try {
-      for (const s of portfolio.sites || []) {
-        if (s.noData) continue;
-        chartHTML += `<h2>Charts — ${esc(s.code)}</h2>${chartsToHTML(s)}`;
-      }
-    } catch { chartHTML = ''; }
-  }
   const body = blocks.map((b) => {
     const t = esc(b.text);
     switch (b.style) {
@@ -438,6 +544,12 @@ export function buildPrintHTML(portfolio, reports, withCharts = true) {
       case 'bullet': return `<li>${t}</li>`;
       case 'rule': return '<hr>';
       case 'pagebreak': return '<div class="pagebreak"></div>';
+      case 'figure': {
+        const html = withCharts ? resolveCssVars(figureHTML(b.fig, b.c, b.risks)) : '';
+        return html
+          ? `<div class="figure">${html}</div>`
+          : `<p class="meta">[Figure: ${t} — not rendered in this export]</p>`;
+      }
       default: return `<p>${t}</p>`;
     }
   }).join('\n')
@@ -485,7 +597,6 @@ export function buildPrintHTML(portfolio, reports, withCharts = true) {
   .row { display: flex; align-items: center; }
   .grow { flex: 1; }
 </style></head><body>${body}
-${chartHTML}
 <p class="meta">Site and resource codes are pseudonyms held only in the author's private reference file.</p>
 </body></html>`;
 }

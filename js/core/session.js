@@ -69,6 +69,10 @@ export function blank() {
     // are recomputed by the same engine, so the week-on-week change is
     // arithmetic rather than something the model is asked to guess.
     previous: null,           // { kind, fileName, loadedAt, model, reports }
+    // The outcome of the last run, kept in the session so it survives a
+    // re-render and a reload. A run that fails after ninety seconds of
+    // retrying must leave a record the user can still read afterwards.
+    lastRun: null,            // { at, requested, succeeded[], failures[{key,message,...}], cancelled }
     settings: {
       provider: 'gemini',
       model: '',

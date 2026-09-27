@@ -323,3 +323,7 @@
   background: var(--hivis-lo); border-radius: var(--r-md);
   font-size: var(--t-sm);
 }
+
+/* A site whose last run failed, so a part-finished batch reads at a glance. */
+.pick--failed { background: var(--survey-lo); border-color: #F3B8B8; }
+.pick--failed .strong { color: var(--survey); }

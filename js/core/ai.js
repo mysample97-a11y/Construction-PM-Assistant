@@ -545,6 +545,8 @@ export function overloadedModels(now = Date.now()) {
     .filter(([m]) => isMarkedOverloaded(m, now))
     .map(([m, t]) => ({ model: m, minutesLeft: Math.ceil((t - now) / 60000) }));
 }
+function markOverloaded(model) { overloadedUntil.set(model, Date.now() + OVERLOAD_COOLOFF_MS); }
+
 export function clearOverloadMemory(model) {
   if (model) overloadedUntil.delete(model); else overloadedUntil.clear();
 }
@@ -572,34 +574,60 @@ export async function run({ kind, payload, settings, followUp, signal, onStatus 
   const fallback = (settings.fallbackModel || '').trim();
   const hasFallback = !!fallback && fallback !== model;
 
-  // Primary is known to be down right now: don't spend requests re-proving it.
-  if (hasFallback && isMarkedOverloaded(model)) {
+  // A model already seen overloaded gets two tries, not five. Without this a
+  // run where BOTH models are down spends about 95 seconds per site proving
+  // something it already knew.
+  const capFor = (mdl, withAlternative) =>
+    (isMarkedOverloaded(mdl) ? 2 : (withAlternative ? 2 : undefined));
+
+  if (hasFallback && isMarkedOverloaded(model) && !isMarkedOverloaded(fallback)) {
     skippedPrimary = true;
     onStatus?.({ why: `${model} is overloaded (seen in the last few minutes) — using ${fallback}`, attempt: 1, maxAttempts: 1, secondsLeft: 0 });
-    out = await ADAPTERS[settings.provider]({ model: fallback, prompt, signal, maxTokens, onStatus });
+    try {
+      out = await ADAPTERS[settings.provider]({ model: fallback, prompt, signal, maxTokens, onStatus, maxAttempts: capFor(fallback, false) });
+    } catch (e) {
+      if (e?.overloaded) markOverloaded(fallback);
+      throw e;
+    }
     usedModel = fallback;
     fellBack = true;
   } else {
     try {
-      // With a fallback available, give the primary two tries (about 5s), not
-      // five (about 90s) — there is a better option waiting.
       out = await ADAPTERS[settings.provider]({
-        model, prompt, signal, maxTokens, onStatus,
-        maxAttempts: hasFallback ? 2 : undefined,
+        model, prompt, signal, maxTokens, onStatus, maxAttempts: capFor(model, hasFallback),
       });
     } catch (e) {
-      if (e?.overloaded) overloadedUntil.set(model, Date.now() + OVERLOAD_COOLOFF_MS);
+      if (e?.overloaded) markOverloaded(model);
       // Only an overload is worth a second model. A bad key, a 429 or a 404
       // would fail identically on any model, so those propagate unchanged.
       if (!e?.overloaded || !hasFallback || signal?.aborted) throw e;
       onStatus?.({ why: `${model} overloaded — switching to ${fallback}`, attempt: 1, maxAttempts: 1, secondsLeft: 0, providerMessage: e.providerMessage });
-      out = await ADAPTERS[settings.provider]({ model: fallback, prompt, signal, maxTokens, onStatus });
+      try {
+        out = await ADAPTERS[settings.provider]({ model: fallback, prompt, signal, maxTokens, onStatus, maxAttempts: capFor(fallback, false) });
+      } catch (e2) {
+        if (e2?.overloaded) markOverloaded(fallback);
+        if (e2?.overloaded) {
+          // Say plainly that BOTH were tried, so the reader does not think the
+          // fallback was never reached.
+          const both = new Error(
+            `Both models are overloaded right now: ${model} and the fallback ${fallback}.`
+            + `${e2.providerMessage ? ` The provider said: "${e2.providerMessage}".` : ''}`
+            + ' This is the provider\'s capacity for these models, not your key, your quota or your token count.'
+            + ' Wait a few minutes, or set a more established model in Settings.');
+          both.overloaded = true;
+          both.status = e2.status;
+          both.bothModels = [model, fallback];
+          both.providerMessage = e2.providerMessage;
+          throw both;
+        }
+        throw e2;
+      }
       usedModel = fallback;
       fellBack = true;
     }
   }
-  // A success on the primary clears any stale mark.
-  if (usedModel === model) overloadedUntil.delete(model);
+  // A success clears any stale mark on whichever model answered.
+  overloadedUntil.delete(usedModel);
   const { text, usage, headers } = out;
   const result = parseModelJson(text);
 

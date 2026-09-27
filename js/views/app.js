@@ -1,6 +1,6 @@
 import {
   $, el, mount, icon, toast, openModal, confirmDialog, pickFile, fmtDate,
-  fmtNum, clamp, debounce, todayISO, titleCase,
+  fmtNum, clamp, debounce, todayISO, titleCase, fmtDateLong,
 } from '../core/util.js';
 import { readWorkbook, parseWorkbook, screenText, xlsxAvailable, STATUS } from '../core/parser.js';
 import { analysePortfolio, comparePortfolios, compareSites } from '../core/engine.js';
@@ -478,13 +478,15 @@ function stepRun(st) {
     });
   };
 
+  const failedKeys = new Set((st.lastRun?.failures || []).map((f) => f.key));
   const boxes = p.sites.map((s) => {
     const isDone = done.has(s.code);
+    const isFailed = failedKeys.has(s.code);
     const checked = st.selection.includes(s.code);
     const cb = el('input', { type: 'checkbox', checked: checked ? true : null, disabled: running ? true : null });
     cb.addEventListener('change', () => toggle(s.code));
     return el('label', {
-      class: `pick${isDone ? ' pick--done' : ''}${currentKey === s.code ? ' pick--active' : ''}`,
+      class: `pick${isDone ? ' pick--done' : ''}${isFailed ? ' pick--failed' : ''}${currentKey === s.code ? ' pick--active' : ''}`,
     }, [
       cb,
       el('span', { class: 'grow' }, [
@@ -492,6 +494,7 @@ function stepRun(st) {
         el('span', { class: 'xs dim', text: s.noData ? ' · no weekly data' : ` · ${s.finishedCount}/${s.liveCount} done` }),
       ]),
       isDone ? el('span', { class: 'xs', style: { color: 'var(--sign)' }, text: '✓ done' }) : null,
+      isFailed && !isDone ? el('span', { class: 'xs', style: { color: 'var(--survey)' }, text: '✗ failed' }) : null,
       currentKey === s.code ? el('span', { class: 'spin' }) : null,
     ]);
   });
@@ -577,6 +580,54 @@ function stepRun(st) {
       el('span', { class: 'xs muted', text: 'executive summary, risks and actions — check before issuing' }),
     ]),
   ]));
+
+  const lr = st.lastRun;
+  if (lr && (lr.failures?.length || lr.cancelled)) {
+    const f = lr.failures?.[0];
+    body.appendChild(el('div', { class: 'notice', dataset: { tone: f ? 'survey' : 'hivis' } }, [
+      el('div', { class: 'row row--wrap', style: { gap: '8px' } }, [
+        el('h4', { class: 'grow', style: { margin: 0 },
+          text: f
+            ? `Last run stopped: ${f.label} was not generated`
+            : `Last run was cancelled — ${lr.succeeded.length} report${lr.succeeded.length === 1 ? '' : 's'} saved` }),
+        el('span', { class: 'xs muted', text: fmtDateLong((lr.at || '').slice(0, 10)) }),
+        el('button', {
+          class: 'btn btn--sm', onclick: () => S.update((x) => { x.lastRun = null; }),
+        }, ['Dismiss']),
+      ]),
+      f ? el('p', { class: 'small', style: { marginTop: '6px' }, text: f.message }) : null,
+      f?.overloaded
+        ? el('p', { class: 'xs muted', style: { margin: '4px 0 0' },
+          text: `Nothing was charged against your token allowance — the request never reached the model. Models tried: ${f.models.join(', ')}.` })
+        : null,
+      lr.succeeded.length
+        ? el('p', { class: 'xs', style: { margin: '4px 0 0', color: 'var(--sign)' },
+          text: `Saved before it stopped: ${lr.succeeded.join(', ')}.` })
+        : null,
+      lr.notRun?.length
+        ? el('p', { class: 'xs muted', style: { margin: '2px 0 0' }, text: `Not attempted: ${lr.notRun.join(', ')}.` })
+        : null,
+      f ? el('button', {
+        class: 'btn btn--sm btn--primary', style: { marginTop: '8px' },
+        onclick: () => {
+          S.update((x) => {
+            x.lastRun = null;
+            const keys = [...new Set([...(x.selection || []), ...lr.failures.map((y) => y.key).filter((k) => k !== MASTER)])];
+            x.selection = keys;
+            if (lr.failures.some((y) => y.key === MASTER)) x.includeMaster = true;
+          });
+          toast('Re-selected what did not finish. Press Generate when the provider has recovered.', 'sign');
+        },
+      }, [icon('refresh', 13), 'Re-select what failed']) : null,
+    ]));
+  } else if (lr && lr.succeeded.length && !lr.failures.length) {
+    body.appendChild(el('div', { class: 'notice', dataset: { tone: 'sign' } }, [
+      el('div', { class: 'row row--wrap', style: { gap: '8px' } }, [
+        el('span', { class: 'grow small', text: `Last run: ${lr.succeeded.length} report${lr.succeeded.length === 1 ? '' : 's'} generated (${lr.succeeded.join(', ')}).` }),
+        el('button', { class: 'btn btn--sm', onclick: () => S.update((x) => { x.lastRun = null; }) }, ['Dismiss']),
+      ]),
+    ]));
+  }
 
   body.appendChild(el('div', {
     id: 'retrybar', class: `retrybar${retryStatus ? '' : ' hidden'}`,
@@ -699,6 +750,9 @@ async function startRun() {
 
   let okCount = 0;
   let failed = null;
+  const succeeded = [];
+  const failures = [];
+  let cancelled = false;
 
   while (queue.length) {
     const key = queue[0];
@@ -739,13 +793,24 @@ async function startRun() {
         if (key === MASTER) s.includeMaster = false;
       });
       okCount++;
+      succeeded.push(key);
       queue.shift();
     } catch (e) {
-      if (e instanceof CancelledError || controller.signal.aborted) {
+      if (e instanceof CancelledError || controller?.signal.aborted) {
+        cancelled = true;
         toast(`Cancelled. ${okCount} report${okCount === 1 ? '' : 's'} completed and saved.`, 'hivis');
         break;
       }
       failed = e;
+      failures.push({
+        key,
+        label: key === MASTER ? 'Master analysis' : key,
+        message: e?.message || String(e),
+        overloaded: !!e?.overloaded,
+        status: e?.status || null,
+        providerMessage: e?.providerMessage || null,
+        models: e?.bothModels || [S.get().settings.model || PROVIDERS[S.get().settings.provider]?.defaultModel].filter(Boolean),
+      });
       break;
     }
   }
@@ -755,12 +820,24 @@ async function startRun() {
   controller = null;
   showRetry(null);
   const left = queue.length;
+  const queueLeft = queue.filter((k) => !failures.some((f) => f.key === k)).map((k) => (k === MASTER ? 'Master analysis' : k));
   queue = [];
   render();
 
+  // Written to the session, not just toasted: a toast that appears after a long
+  // retry and fades in ten seconds is the same as no message at all.
+  S.update((s) => {
+    s.lastRun = {
+      at: new Date().toISOString(),
+      requested: keys.map((k) => (k === MASTER ? 'Master analysis' : k)),
+      succeeded, failures, cancelled,
+      notRun: queueLeft,
+    };
+  });
+
   if (failed) {
-    toast(failed.message, 'survey', 10000);
-    if (okCount) toast(`${okCount} report${okCount === 1 ? '' : 's'} finished before the error and ${left ? 'are' : 'is'} saved. Use Continue to pick up where it stopped.`, 'hivis', 9000);
+    toast(failed.message, 'survey', 12000);
+    if (okCount) toast(`${okCount} report${okCount === 1 ? '' : 's'} finished before the error and ${left ? 'are' : 'is'} saved.`, 'hivis', 9000);
   } else if (okCount && !left) {
     toast(`${okCount} report${okCount === 1 ? '' : 's'} generated.`, 'sign');
   }
@@ -1355,10 +1432,16 @@ function showPayload(key, asConfirm = false, total = 1) {
       payload, settings: st.settings,
     });
 
+    // The dialog's close event and the button handler both settle this promise.
+    // Browsers queue the close event, jsdom fires it inline — so the order is
+    // not guaranteed, and whichever runs first must win cleanly rather than the
+    // answer depending on timing.
+    let settled = false;
+    const done = (v) => { if (!settled) { settled = true; resolve(v); } };
     const { body, foot, close } = openModal({
       title: asConfirm ? 'Confirm before sending' : 'What would be sent',
       wide: true,
-      onClose: () => resolve(false),
+      onClose: () => done(false),
     });
 
     mount(body,
@@ -1376,8 +1459,8 @@ function showPayload(key, asConfirm = false, total = 1) {
       el('pre', { class: 'payload-preview', text: JSON.stringify(pv.payload, null, 2) }),
     );
     mount(foot,
-      el('button', { class: 'btn', onclick: () => { close(); resolve(false); } }, [asConfirm ? 'Cancel' : 'Close']),
-      asConfirm ? el('button', { class: 'btn btn--primary', onclick: () => { close(); resolve(true); } }, ['Send it']) : null,
+      el('button', { class: 'btn', onclick: () => { done(false); close(); } }, [asConfirm ? 'Cancel' : 'Close']),
+      asConfirm ? el('button', { class: 'btn btn--primary', onclick: () => { done(true); close(); } }, ['Send it']) : null,
     );
   });
 }
